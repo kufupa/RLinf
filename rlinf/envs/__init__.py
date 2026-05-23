@@ -21,6 +21,7 @@ class SupportedEnvType(Enum):
     ROBOTWIN = "robotwin"
     ISAACLAB = "isaaclab"
     METAWORLD = "metaworld"
+    SMOLVLA_METAWORLD = "smolvla_metaworld"
     BEHAVIOR = "behavior"
     CALVIN = "calvin"
     ROBOCASA = "robocasa"
@@ -84,6 +85,10 @@ def get_env_cls(env_type: str, env_cfg=None):
         from rlinf.envs.metaworld.metaworld_env import MetaWorldEnv
 
         return MetaWorldEnv
+    elif env_type == SupportedEnvType.SMOLVLA_METAWORLD:
+        from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
+
+        return SmolVLAMetaWorldEnv
     elif env_type == SupportedEnvType.BEHAVIOR:
         from rlinf.envs.behavior.behavior_env import BehaviorEnv
 

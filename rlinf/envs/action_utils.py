@@ -255,6 +255,8 @@ def prepare_actions(
             raw_chunk_actions=raw_chunk_actions,
             model_type=model_type,
         )
+    elif env_type == SupportedEnvType.SMOLVLA_METAWORLD:
+        chunk_actions = np.asarray(raw_chunk_actions, dtype=np.float32)
     elif env_type == SupportedEnvType.CALVIN:
         chunk_actions = prepare_actions_for_calvin(
             raw_chunk_actions=raw_chunk_actions,

@@ -28,7 +28,7 @@ from rlinf.scheduler import (
     Worker,
 )
 from rlinf.scheduler.cluster.cluster import ClusterEnvVar, PathEnvMergeMode
-from rlinf.scheduler.cluster.config import ClusterConfig, NsightConfig
+from rlinf.scheduler.cluster.config import ClusterConfig, NsightConfig, RayInitConfig
 from rlinf.scheduler.hardware.robots.franka import FrankaConfig
 
 
@@ -49,6 +49,64 @@ def path_merge_test_env_var() -> str:
         # before the test worker starts, so use another whitelisted path var.
         return "LIBRARY_PATH"
     return "LD_LIBRARY_PATH"
+
+
+def test_cluster_config_parses_ray_init_config():
+    cfg = OmegaConf.create(
+        {
+            "num_nodes": 1,
+            "component_placement": {},
+            "ray": {
+                "address": "local",
+                "temp_dir": "/tmp/rlinf_ray_test",
+                "include_dashboard": False,
+            },
+        }
+    )
+
+    parsed = ClusterConfig.from_dict_cfg(cfg)
+
+    assert parsed.ray is not None
+    assert parsed.ray.address == "local"
+    assert parsed.ray.temp_dir == "/tmp/rlinf_ray_test"
+    assert parsed.ray.include_dashboard is False
+
+
+def test_cluster_config_defaults_ray_to_auto():
+    cfg = OmegaConf.create({"num_nodes": 1, "component_placement": {}})
+
+    parsed = ClusterConfig.from_dict_cfg(cfg)
+
+    assert parsed.ray is not None
+    assert parsed.ray.address == "auto"
+    assert parsed.ray.temp_dir is None
+    assert parsed.ray.include_dashboard is None
+
+
+def test_cluster_builds_default_auto_ray_init_kwargs():
+    cfg = RayInitConfig()
+
+    kwargs = Cluster._build_ray_init_kwargs(cfg, runtime_env=None)
+
+    assert kwargs["address"] == "auto"
+    assert kwargs["namespace"] == Cluster.NAMESPACE
+    assert "_temp_dir" not in kwargs
+    assert "include_dashboard" not in kwargs
+
+
+def test_cluster_builds_local_ray_init_kwargs():
+    cfg = RayInitConfig(
+        address="local",
+        temp_dir="/tmp/rlinf_ray_123",
+        include_dashboard=False,
+    )
+
+    kwargs = Cluster._build_ray_init_kwargs(cfg, runtime_env={"env_vars": {"A": "B"}})
+
+    assert kwargs["address"] == "local"
+    assert kwargs["_temp_dir"] == "/tmp/rlinf_ray_123"
+    assert kwargs["include_dashboard"] is False
+    assert kwargs["runtime_env"] == {"env_vars": {"A": "B"}}
 
 
 def test_cluster_config_parses_node_group_hardware():

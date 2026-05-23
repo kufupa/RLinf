@@ -33,7 +33,7 @@ from ray._private import ray_logging
 from ray.actor import ActorHandle
 from ray.util.state import list_actors
 
-from .config import ClusterConfig, NsightConfig
+from .config import ClusterConfig, NsightConfig, RayInitConfig
 from .node import NodeGroupInfo, NodeInfo, NodeProbe
 from .utils import DistributedRayLogCollector, without_http_proxies
 
@@ -288,6 +288,26 @@ class Cluster:
             .remote(*args)
         )
 
+    @staticmethod
+    def _build_ray_init_kwargs(
+        ray_cfg: Optional[RayInitConfig],
+        runtime_env: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ray_cfg = ray_cfg or RayInitConfig()
+        kwargs: dict[str, Any] = {
+            "logging_level": Cluster.LOGGING_LEVEL,
+            "namespace": Cluster.NAMESPACE,
+        }
+        if ray_cfg.address is not None:
+            kwargs["address"] = ray_cfg.address
+        if runtime_env is not None:
+            kwargs["runtime_env"] = runtime_env
+        if ray_cfg.temp_dir is not None:
+            kwargs["_temp_dir"] = ray_cfg.temp_dir
+        if ray_cfg.include_dashboard is not None:
+            kwargs["include_dashboard"] = ray_cfg.include_dashboard
+        return kwargs
+
     def _init_and_launch_managers(
         self,
         num_nodes: int,
@@ -337,32 +357,37 @@ class Cluster:
             Cluster._prepare_ray_code_sync_runtime_env_fragment()
         )
 
+        ray_runtime_env = (
+            dict(self._ray_code_sync_fragment)
+            if self._ray_code_sync_fragment is not None
+            else None
+        )
+        if ray_runtime_env is not None:
+            py_mods = ray_runtime_env.get("py_modules") or ()
+            self._logger.info(
+                "%s Ray code sync is enabled (py_modules=%r); workers receive "
+                "only the rlinf package from the launch node. Disable with %s=0.",
+                Cluster.SYS_NAME,
+                tuple(py_mods),
+                Cluster.get_full_env_var_name(ClusterEnvVar.CODE_WORKING_DIR),
+            )
+
+        ray_init_kwargs = Cluster._build_ray_init_kwargs(
+            self._cluster_cfg.ray if self._cluster_cfg else None,
+            runtime_env=ray_runtime_env,
+        )
         try:
-            # First try to connect to an existing Ray cluster
-            ray_init_kwargs: dict[str, Any] = {
-                "address": "auto",
-                "logging_level": Cluster.LOGGING_LEVEL,
-                "namespace": Cluster.NAMESPACE,
-            }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
-                py_mods = ray_init_kwargs["runtime_env"].get("py_modules") or ()
-                self._logger.info(
-                    "%s Ray code sync is enabled (py_modules=%r); workers receive "
-                    "only the rlinf package from the launch node. Disable with %s=0.",
-                    Cluster.SYS_NAME,
-                    tuple(py_mods),
-                    Cluster.get_full_env_var_name(ClusterEnvVar.CODE_WORKING_DIR),
-                )
             ray.init(**ray_init_kwargs)
         except ConnectionError:
-            ray_init_kwargs = {
+            if ray_init_kwargs.get("address") != "auto":
+                raise
+            fallback_kwargs: dict[str, Any] = {
                 "logging_level": Cluster.LOGGING_LEVEL,
                 "namespace": Cluster.NAMESPACE,
             }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
-            ray.init(**ray_init_kwargs)
+            if ray_runtime_env is not None:
+                fallback_kwargs["runtime_env"] = ray_runtime_env
+            ray.init(**fallback_kwargs)
 
         # Ray log collector
         if distributed_log_dir is not None:

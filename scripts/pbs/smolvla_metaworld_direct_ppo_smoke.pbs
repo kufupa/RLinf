@@ -1,0 +1,17 @@
+#!/bin/bash
+#PBS -N smolvla-direct-ppo
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -o logs/pbs/smolvla-direct-ppo-smoke.out
+
+set -euo pipefail
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+export SMOLVLA_PPO_SMOKE_OUT="logs/smolvla_direct_ppo_smoke_${PBS_JOBID:-local}"
+
+"${PYTHON_BIN}" scripts/smoke_smolvla_metaworld_ppo.py

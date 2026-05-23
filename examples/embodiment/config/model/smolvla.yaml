@@ -1,0 +1,23 @@
+model_type: "smolvla"
+
+model_path: "jadechoghari/smolvla_metaworld"
+precision: null
+load_to_device: True
+fsdp_uniform_dtype: "bfloat16"
+
+num_action_chunks: 5
+action_dim: 4
+state_dim: 4
+n_action_steps: 5
+
+add_value_head: True
+detach_critic_input: True
+value_head_hidden_sizes: [128, 128]
+value_head_activation: "relu"
+
+freeze_all_but_ppo_trainables: True
+action_low: -1.0
+action_high: 1.0
+
+is_lora: False
+lora_rank: 32

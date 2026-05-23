@@ -20,6 +20,7 @@ RUN_LOG="logs/pbs/smolvla-stable-segment-${RUN_ID}.driver.log"
   --config-name metaworld_pushv3_ppo_smolvla \
   cluster.ray.address=local \
   cluster.ray.temp_dir="${RAY_TMPDIR}" \
+  cluster.ray.include_dashboard=false \
   runner.logger.log_path="${RLINF_RESULTS_DIR}/smolvla_pushv3_ppo_stable_segment_${RUN_ID}" \
   runner.logger.experiment_name="smolvla_pushv3_ppo_stable_segment" \
   runner.logger.logger_backends=[] \

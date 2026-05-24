@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-len", type=int, default=5)
     parser.add_argument("--checkpoint-stride", type=int, default=1)
     parser.add_argument("--max-checkpoints", type=int, default=0)
+    parser.add_argument("--include-baseline", action="store_true")
+    parser.add_argument("--only-updates", default="")
     return parser.parse_args()
 
 
@@ -54,6 +56,13 @@ def list_checkpoints(path: Path, stride: int, max_checkpoints: int) -> list[Path
     if max_checkpoints > 0:
         ckpts = ckpts[:max_checkpoints]
     return ckpts
+
+
+def filter_checkpoints_by_update(ckpts: list[Path], only_updates: str) -> list[Path]:
+    if not only_updates:
+        return ckpts
+    wanted = {int(part.strip()) for part in only_updates.split(",") if part.strip()}
+    return [ckpt for ckpt in ckpts if checkpoint_update(ckpt) in wanted]
 
 
 def make_env(args: argparse.Namespace) -> SmolVLAMetaWorldEnv:
@@ -130,12 +139,17 @@ def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
         f.write(json.dumps(payload, sort_keys=True) + "\n")
 
 
+def eval_seed_list(args: argparse.Namespace) -> list[int]:
+    return [args.seed_base + idx for idx in range(args.num_envs)]
+
+
 @torch.no_grad()
 def evaluate_checkpoint(
     model: torch.nn.Module,
     env: SmolVLAMetaWorldEnv,
     args: argparse.Namespace,
-) -> dict[str, float]:
+) -> dict[str, Any]:
+    seeds = eval_seed_list(args)
     env._reset_counter = 0
     obs, _ = env.reset()
     reward_sum = torch.zeros(args.num_envs, dtype=torch.float32)
@@ -159,11 +173,16 @@ def evaluate_checkpoint(
         if "success_once" in final_info:
             success |= final_info["success_once"].bool()
         obs = obs_list[-1]
+    per_env_success = success.cpu().tolist()
     return {
         "success_rate": float(success.float().mean().item()),
+        "success_count": int(success.sum().item()),
         "return_mean": float(reward_sum.mean().item()),
         "return_max": float(reward_sum.max().item()),
         "episode_len_mean": float(episode_len.mean().item()),
+        "eval_seeds": seeds,
+        "per_env_success": per_env_success,
+        "success_seeds": [seed for seed, ok in zip(seeds, per_env_success) if ok],
     }
 
 
@@ -182,7 +201,8 @@ def main() -> None:
         stride=max(1, args.checkpoint_stride),
         max_checkpoints=args.max_checkpoints,
     )
-    if not ckpts:
+    ckpts = filter_checkpoints_by_update(ckpts, args.only_updates)
+    if not ckpts and not args.include_baseline:
         raise FileNotFoundError(f"No update_*.pt checkpoints in {checkpoint_dir}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -196,6 +216,20 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     start_time = time.time()
     try:
+        if args.include_baseline:
+            t0 = time.time()
+            metrics = evaluate_checkpoint(model, env, args)
+            row = {
+                "run_name": args.run_name,
+                "checkpoint": "baseline",
+                "update": 0,
+                "source_train_metrics": {},
+                "eval_wall_s": round(time.time() - t0, 3),
+                **metrics,
+            }
+            append_jsonl(results_path, row)
+            rows.append(row)
+            print("SMOLVLA_EVAL_RESULT " + json.dumps(row, sort_keys=True), flush=True)
         for ckpt in ckpts:
             t0 = time.time()
             checkpoint = load_trainable_delta(model, ckpt)

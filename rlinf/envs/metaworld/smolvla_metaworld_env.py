@@ -77,6 +77,7 @@ class SmolVLAMetaWorldEnv(gym.Env):
         self.returns = np.zeros(self.num_envs, dtype=np.float32)
         self.reset_seeds = np.zeros(self.num_envs, dtype=np.int64)
         self.reset_state_ids = self.reset_seeds.copy()
+        self._terminal_rows = np.zeros(self.num_envs, dtype=bool)
 
         self.video_cfg = self.cfg.video_cfg
         self.env = self._make_rollout()
@@ -183,21 +184,37 @@ class SmolVLAMetaWorldEnv(gym.Env):
         raw_obs = self.env.reset_many(seeds)
         self.last_obs = raw_obs
         self._reset_metrics()
+        self._terminal_rows[:] = False
         return self._wrap_obs(raw_obs), {}
 
     def update_reset_state_ids(self):
         """Compatibility hook for RLinf EnvWorker rollout finalization."""
         self.reset_state_ids = self.reset_seeds.copy()
 
-    def _step_reward(self, env_reward: np.ndarray, success: np.ndarray) -> np.ndarray:
+    def _step_reward(
+        self,
+        env_reward: np.ndarray,
+        success: np.ndarray,
+        active_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if active_mask is None:
+            active_mask = np.ones(self.num_envs, dtype=bool)
+        active_mask = np.asarray(active_mask, dtype=bool).reshape(self.num_envs)
+        step_reward = np.zeros(self.num_envs, dtype=np.float32)
+        env_reward = np.asarray(env_reward, dtype=np.float32).reshape(self.num_envs)
+        success = np.asarray(success, dtype=bool).reshape(self.num_envs)
         if self.reward_mode == "dense_return":
-            return self.reward_coef * env_reward.astype(np.float32)
+            step_reward[active_mask] = self.reward_coef * env_reward[active_mask]
+            return step_reward
+
         reward = self.reward_coef * success.astype(np.float32)
         if self.use_rel_reward:
             reward_diff = reward - self.prev_step_reward
-            self.prev_step_reward = reward
-            return reward_diff.astype(np.float32)
-        return reward.astype(np.float32)
+            step_reward[active_mask] = reward_diff[active_mask]
+            self.prev_step_reward[active_mask] = reward[active_mask]
+            return step_reward
+        step_reward[active_mask] = reward[active_mask]
+        return step_reward
 
     def _record_metrics(self, step_reward, terminations, infos):
         self.returns += step_reward
@@ -211,19 +228,33 @@ class SmolVLAMetaWorldEnv(gym.Env):
         infos["episode"] = to_tensor(episode_info)
         return infos
 
-    def step(self, actions=None, auto_reset=True):
+    def step(self, actions=None, auto_reset=True, active_mask=None):
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
         actions = np.asarray(actions, dtype=np.float32)
         if actions.shape != (self.num_envs, 4):
             raise ValueError(f"Expected action shape {(self.num_envs, 4)}, got {actions.shape}")
 
-        self._elapsed_steps += 1
-        batch_step = self.env.step_batch(actions)
+        if active_mask is None:
+            active_mask = ~self._terminal_rows
+        active_mask = np.asarray(active_mask, dtype=bool).reshape(self.num_envs)
+        active_mask = active_mask & ~self._terminal_rows
+        step_actions = actions.copy()
+        step_actions[~active_mask] = 0.0
+
+        self._elapsed_steps[active_mask] += 1
+        batch_step = self.env.step_batch(step_actions)
         self.last_obs = batch_step.observation
-        terminations = np.asarray(batch_step.success, dtype=bool).reshape(self.num_envs)
-        truncations = self.elapsed_steps >= self.max_episode_steps
-        step_reward = self._step_reward(np.asarray(batch_step.reward), terminations)
+        terminations = (
+            np.asarray(batch_step.success, dtype=bool).reshape(self.num_envs)
+            & active_mask
+        )
+        truncations = (self.elapsed_steps >= self.max_episode_steps) & active_mask
+        step_reward = self._step_reward(
+            np.asarray(batch_step.reward),
+            terminations,
+            active_mask=active_mask,
+        )
 
         obs = self._wrap_obs(batch_step.observation)
         infos = dict(batch_step.info) if isinstance(batch_step.info, dict) else {}
@@ -252,11 +283,50 @@ class SmolVLAMetaWorldEnv(gym.Env):
         chunk_rewards = []
         raw_chunk_terminations = []
         raw_chunk_truncations = []
+        valid_action_masks = []
+        executed_steps = np.zeros(self.num_envs, dtype=np.int64)
+        terminal_rows = np.zeros(self.num_envs, dtype=bool)
+        terminal_episode: dict[str, torch.Tensor] = {}
 
         for i in range(chunk_size):
-            obs, reward, terminations, truncations, infos = self.step(
-                chunk_actions[:, i], auto_reset=False
-            )
+            active = ~self._terminal_rows
+            valid_action_masks.append(torch.as_tensor(active.copy(), dtype=torch.bool))
+            if bool(active.any()):
+                obs, reward, terminations, truncations, infos = self.step(
+                    chunk_actions[:, i], auto_reset=False, active_mask=active
+                )
+            else:
+                obs = self._wrap_obs(self.last_obs)
+                reward = torch.zeros(self.num_envs, dtype=torch.float32)
+                terminations = torch.zeros(self.num_envs, dtype=torch.bool)
+                truncations = torch.zeros(self.num_envs, dtype=torch.bool)
+                infos = self._record_metrics(
+                    np.zeros(self.num_envs, dtype=np.float32),
+                    np.zeros(self.num_envs, dtype=bool),
+                    {},
+                )
+            infos = copy.deepcopy(infos)
+            executed_steps += active.astype(np.int64)
+            infos["valid_action_mask"] = to_tensor(active.copy())
+            infos["executed_steps"] = to_tensor(executed_steps.copy())
+
+            done_rows = torch.logical_or(terminations, truncations).detach().cpu().numpy()
+            if np.asarray(done_rows).any():
+                terminal_rows |= np.asarray(done_rows, dtype=bool)
+                episode = infos.get("episode", {})
+                for key, value in episode.items():
+                    if not isinstance(value, torch.Tensor) or value.shape[:1] != (
+                        self.num_envs,
+                    ):
+                        continue
+                    if key not in terminal_episode:
+                        terminal_episode[key] = torch.zeros_like(value)
+                    terminal_episode[key][torch.as_tensor(done_rows, dtype=torch.bool)] = value[
+                        torch.as_tensor(done_rows, dtype=torch.bool)
+                    ]
+                self._terminal_rows |= np.asarray(done_rows, dtype=bool)
+                self._reset_metrics(np.asarray(done_rows, dtype=bool))
+
             obs_list.append(obs)
             infos_list.append(infos)
             chunk_rewards.append(reward)
@@ -269,20 +339,33 @@ class SmolVLAMetaWorldEnv(gym.Env):
         past_terminations = raw_chunk_terminations.any(dim=1)
         past_truncations = raw_chunk_truncations.any(dim=1)
         past_dones = torch.logical_or(past_terminations, past_truncations)
+        valid_action_mask = torch.stack(valid_action_masks, dim=1)
 
         if past_dones.any() and self.auto_reset:
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones.cpu().numpy(), obs_list[-1], infos_list[-1]
             )
 
-        if self.auto_reset or self.ignore_terminations:
-            chunk_terminations = torch.zeros_like(raw_chunk_terminations)
-            chunk_terminations[:, -1] = past_terminations
-            chunk_truncations = torch.zeros_like(raw_chunk_truncations)
-            chunk_truncations[:, -1] = past_truncations
-        else:
-            chunk_terminations = raw_chunk_terminations.clone()
-            chunk_truncations = raw_chunk_truncations.clone()
+        chunk_terminations = raw_chunk_terminations.clone()
+        chunk_truncations = raw_chunk_truncations.clone()
+        if infos_list:
+            infos_list[-1] = copy.deepcopy(infos_list[-1])
+            final_episode = infos_list[-1].get("episode", {})
+            if terminal_episode:
+                final_episode = copy.deepcopy(final_episode)
+                done_tensor = torch.as_tensor(terminal_rows, dtype=torch.bool)
+                for key, value in terminal_episode.items():
+                    base = final_episode.get(key, torch.zeros_like(value))
+                    if isinstance(base, torch.Tensor) and base.shape == value.shape:
+                        base = base.clone()
+                        base[done_tensor] = value[done_tensor]
+                        final_episode[key] = base
+                infos_list[-1]["episode"] = final_episode
+            infos_list[-1]["valid_action_mask"] = valid_action_mask
+            infos_list[-1]["executed_steps"] = torch.as_tensor(
+                executed_steps, dtype=torch.long
+            )
+            infos_list[-1]["all_rows_terminal"] = bool(self._terminal_rows.all())
 
         return (
             obs_list,

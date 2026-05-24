@@ -119,6 +119,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         self.postprocessor = self._bundle.postprocessor
         self.obs_image_key = self._bundle.obs_image_key
         self.obs_state_key = self._bundle.obs_state_key
+        self._last_reset_seeds: torch.Tensor | None = None
 
         if cfg.get("add_value_head", False):
             self.value_head = ValueHead(
@@ -211,6 +212,22 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             "agent_pos": states_np.astype(np.float32),
             "task": list(task_descriptions),
         }
+
+    def _reset_policy_state_if_needed(self, env_obs: dict[str, Any]) -> None:
+        reset_seeds = env_obs.get("reset_seeds")
+        if reset_seeds is None:
+            return
+        seeds = torch.as_tensor(reset_seeds, dtype=torch.long).detach().cpu()
+        if (
+            self._last_reset_seeds is not None
+            and self._last_reset_seeds.shape == seeds.shape
+            and torch.equal(self._last_reset_seeds, seeds)
+        ):
+            return
+        policy_reset = getattr(self.policy, "reset", None)
+        if callable(policy_reset):
+            policy_reset()
+        self._last_reset_seeds = seeds.clone()
 
     def obs_to_proc(self, env_obs: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -375,6 +392,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         compute_values: bool = True,
         **kwargs,
     ):
+        self._reset_policy_state_if_needed(env_obs)
         proc = self.obs_to_proc(env_obs)
         device = next(self.parameters()).device
         proc = _to_device(proc, device, dtype=self._floating_param_dtype())
@@ -427,6 +445,8 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         )
 
         output_dict = {}
+        output_dict["mean"] = mean
+        output_dict["log_std"] = log_std
         if compute_logprobs:
             output_dict["logprobs"] = self.gaussian_log_prob_per_dim(
                 mean, log_std, unsquashed

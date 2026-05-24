@@ -37,6 +37,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-episode-steps", type=int, default=120)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--reset-seed-base", type=int, default=2000)
+    parser.add_argument("--eval-seed-base", type=int, default=50000)
+    parser.add_argument("--reward-mode", default="sparse_success_delta")
+    parser.add_argument("--use-rel-reward", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--noop-policy", action="store_true")
+    parser.add_argument("--force-zero-reward", action="store_true")
+    parser.add_argument("--save-initial-checkpoint", action="store_true")
+    parser.add_argument("--advantage-mode", choices=("gae", "mc"), default="gae")
     parser.add_argument("--lr", type=float, default=5e-6)
     parser.add_argument("--value-lr", type=float, default=1e-4)
     parser.add_argument("--update-epochs", type=int, default=2)
@@ -62,9 +69,9 @@ def make_env(args: argparse.Namespace) -> SmolVLAMetaWorldEnv:
             "max_episode_steps": args.max_episode_steps,
             "auto_reset": False,
             "ignore_terminations": False,
-            "use_rel_reward": True,
+            "use_rel_reward": bool(args.use_rel_reward),
             "reward_coef": 1.0,
-            "reward_mode": "sparse_success_delta",
+            "reward_mode": args.reward_mode,
             "reset_seed_base": args.reset_seed_base,
             "use_async_envs": False,
             "video_cfg": {"save_video": False},
@@ -107,6 +114,7 @@ def compute_gae(
     rewards: torch.Tensor,
     values: torch.Tensor,
     dones: torch.Tensor,
+    valid_mask: torch.Tensor,
     gamma: float,
     gae_lambda: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -115,13 +123,93 @@ def compute_gae(
     last_adv = torch.zeros(num_envs, device=rewards.device)
     next_value = torch.zeros(num_envs, device=rewards.device)
     for t in reversed(range(rewards.shape[1])):
-        mask = 1.0 - dones[:, t].float()
+        valid = valid_mask[:, t].float()
+        mask = (1.0 - dones[:, t].float()) * valid
         delta = rewards[:, t] + gamma * next_value * mask - values[:, t]
         last_adv = delta + gamma * gae_lambda * mask * last_adv
-        advantages[:, t] = last_adv
+        advantages[:, t] = last_adv * valid
         next_value = values[:, t]
     returns = advantages + values
     return advantages, returns
+
+
+def compute_discounted_returns(
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    valid_mask: torch.Tensor,
+    gamma: float,
+) -> torch.Tensor:
+    num_envs = rewards.shape[0]
+    returns = torch.zeros_like(rewards)
+    next_return = torch.zeros(num_envs, device=rewards.device)
+    for t in reversed(range(rewards.shape[1])):
+        valid = valid_mask[:, t].float()
+        mask = (1.0 - dones[:, t].float()) * valid
+        next_return = (rewards[:, t] + gamma * next_return * mask) * valid
+        returns[:, t] = next_return
+    return returns
+
+
+def normalize_advantages(advantages: torch.Tensor, valid_mask: torch.Tensor) -> tuple[torch.Tensor, float, float]:
+    valid = valid_mask.bool()
+    normalized = torch.zeros_like(advantages)
+    if not bool(valid.any()):
+        return normalized, 0.0, 0.0
+    valid_adv = advantages[valid]
+    mean = valid_adv.mean()
+    std = valid_adv.std(unbiased=False)
+    if float(std.detach().cpu()) > 1e-8:
+        normalized[valid] = (valid_adv - mean) / (std + 1e-8)
+    else:
+        normalized[valid] = valid_adv - mean
+    valid_norm = normalized[valid]
+    return normalized, float(valid_norm.mean().detach().cpu()), float(valid_norm.std(unbiased=False).detach().cpu())
+
+
+def should_update_actor(
+    rewards: torch.Tensor,
+    valid_mask: torch.Tensor,
+    eps: float = 1e-8,
+) -> bool:
+    if not bool(valid_mask.any()):
+        return False
+    reward_sum = (rewards * valid_mask.to(rewards.device).float()).abs().sum()
+    return float(reward_sum.detach().cpu()) > eps
+
+
+def masked_chunk_logprob(logprobs: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:
+    valid = valid_mask.to(device=logprobs.device, dtype=logprobs.dtype).unsqueeze(-1)
+    return (logprobs * valid).sum(dim=(1, 2))
+
+
+def _trainable_param_norm(model: torch.nn.Module, needle: str | None = "all") -> float:
+    total = 0.0
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        is_value = "value_head" in name
+        if needle == "value_head" and not is_value:
+            continue
+        if needle is None and is_value:
+            continue
+        value = float(param.detach().float().norm().cpu())
+        total += value * value
+    return total ** 0.5
+
+
+def _grad_norm_by_name(model: torch.nn.Module, needle: str | None) -> float:
+    total = 0.0
+    for name, param in model.named_parameters():
+        if not param.requires_grad or param.grad is None:
+            continue
+        is_value = "value_head" in name
+        if needle == "value_head" and not is_value:
+            continue
+        if needle is None and is_value:
+            continue
+        value = float(param.grad.detach().float().norm().cpu())
+        total += value * value
+    return total ** 0.5
 
 
 def tensorize_forward_inputs(batch: list[dict[str, torch.Tensor]], indices: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -199,89 +287,186 @@ def main() -> None:
         obs, _ = env.reset()
         steps_per_rollout = max(args.chunk_len, args.steps_per_update)
         chunks_per_rollout = max(1, steps_per_rollout // args.chunk_len)
+        metrics: dict[str, Any] = {
+            "time_s": 0.0,
+            "run_name": args.run_name,
+            "update": 0,
+            "env_steps": 0,
+            "reward_mean": 0.0,
+            "return_mean": 0.0,
+            "raw_reward_sum": 0.0,
+            "actor_update_skipped": True,
+        }
+        if args.save_initial_checkpoint:
+            save_checkpoint(output_dir, model, optim, 0, metrics)
         for update in range(1, args.total_updates + 1):
             rollout_inputs: list[dict[str, torch.Tensor]] = []
             rollout_old_logp: list[torch.Tensor] = []
             rollout_values: list[torch.Tensor] = []
             rollout_rewards: list[torch.Tensor] = []
             rollout_dones: list[torch.Tensor] = []
+            rollout_valid_masks: list[torch.Tensor] = []
             rollout_entropy: list[torch.Tensor] = []
             successes = []
             ep_lens = []
+            action_clip_fracs = []
+            done_any_count = 0
+            done_all_count = 0
+            param_norm_before = _trainable_param_norm(model, "all")
+            actor_param_norm_before = _trainable_param_norm(model, None)
+            critic_param_norm_before = _trainable_param_norm(model, "value_head")
 
             for _ in range(chunks_per_rollout):
                 actions, policy_out = model.predict_action_batch(obs, mode="train")
                 out = model.default_forward(policy_out["forward_inputs"])
                 chunk_actions = actions.detach().cpu().numpy()
                 obs_list, rewards, terms, truncs, infos_list = env.chunk_step(chunk_actions)
+                if args.force_zero_reward:
+                    rewards = torch.zeros_like(rewards)
+                valid_mask = infos_list[-1].get(
+                    "valid_action_mask",
+                    torch.ones_like(rewards, dtype=torch.bool),
+                )
+                valid_mask_cpu = valid_mask.detach().cpu().bool()
                 rollout_inputs.append(policy_out["forward_inputs"])
                 rollout_old_logp.append(policy_out["prev_logprobs"].detach().cpu())
                 rollout_values.append(out["values"].detach().cpu())
                 rollout_rewards.append(rewards.detach().cpu())
                 rollout_dones.append((terms | truncs).detach().cpu())
+                rollout_valid_masks.append(valid_mask_cpu)
                 rollout_entropy.append(out["entropy"].detach().cpu())
+                done_chunk = (terms | truncs).detach().cpu()
+                done_any_count += int(done_chunk.any().item())
+                done_all_count += int(done_chunk.all(dim=0).sum().item())
+                action_clip_fracs.append(
+                    torch.as_tensor(
+                        np.isclose(chunk_actions, -1.0) | np.isclose(chunk_actions, 1.0),
+                        dtype=torch.float32,
+                    )
+                    .mean(dim=2)
+                    .cpu()
+                )
                 final_info = infos_list[-1].get("episode", {})
                 if "success_once" in final_info:
                     successes.extend(final_info["success_once"].detach().cpu().numpy().astype(float).tolist())
                 if "episode_len" in final_info:
                     ep_lens.extend(final_info["episode_len"].detach().cpu().numpy().astype(float).tolist())
                 obs = obs_list[-1]
-                if bool((terms | truncs).any()):
+                if bool(infos_list[-1].get("all_rows_terminal", False)) or bool((terms | truncs).all()):
                     obs, _ = env.reset()
 
             old_logp = torch.cat(rollout_old_logp, dim=1).to(device)
             values_chunk = torch.cat(rollout_values, dim=0).reshape(chunks_per_rollout, args.num_envs).T
             rewards = torch.cat(rollout_rewards, dim=1).to(device)
             dones = torch.cat(rollout_dones, dim=1).to(device)
-            values = values_chunk.repeat_interleave(args.chunk_len, dim=1).to(device)
-            advantages, returns = compute_gae(rewards, values, dones, args.gamma, args.gae_lambda)
-            advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
+            valid_mask = torch.cat(rollout_valid_masks, dim=1).to(device).bool()
+            if not bool(valid_mask.any()):
+                obs, _ = env.reset()
+                raise RuntimeError(
+                    f"rollout at update {update} has zero valid steps after terminal masking"
+                )
+            chunk_valid = valid_mask.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)
+            rewards_chunk = (
+                rewards.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)
+                * chunk_valid.float()
+            ).sum(dim=2)
+            dones_chunk = dones.reshape(args.num_envs, chunks_per_rollout, args.chunk_len).any(dim=2)
+            values = values_chunk.to(device)
+            if args.advantage_mode == "gae":
+                advantages_raw, returns = compute_gae(
+                    rewards_chunk,
+                    values,
+                    dones_chunk,
+                    chunk_valid.any(dim=2),
+                    args.gamma ** args.chunk_len,
+                    args.gae_lambda,
+                )
+            else:
+                returns = compute_discounted_returns(
+                    rewards_chunk,
+                    dones_chunk,
+                    chunk_valid.any(dim=2),
+                    args.gamma ** args.chunk_len,
+                )
+                advantages_raw = returns.detach()
+            train_actor = should_update_actor(rewards, valid_mask)
+            if train_actor:
+                advantages, adv_norm_mean, adv_norm_std = normalize_advantages(
+                    advantages_raw,
+                    chunk_valid.any(dim=2),
+                )
+            else:
+                advantages = torch.zeros_like(advantages_raw)
+                adv_norm_mean = 0.0
+                adv_norm_std = 0.0
 
             flat_count = args.num_envs * chunks_per_rollout
             flat_indices = torch.arange(flat_count)
             env_ids = flat_indices % args.num_envs
             chunk_ids = flat_indices // args.num_envs
             old_logp_chunk = old_logp.reshape(args.num_envs, chunks_per_rollout, args.chunk_len, 4)
-            old_logp_flat = old_logp_chunk[env_ids, chunk_ids].sum(dim=(1, 2)).to(device)
-            adv_flat = advantages.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)[
-                env_ids, chunk_ids
-            ].sum(dim=1).to(device)
-            ret_flat = returns.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)[
-                env_ids, chunk_ids
-            ].mean(dim=1).to(device)
+            old_valid_chunk = chunk_valid.reshape(args.num_envs, chunks_per_rollout, args.chunk_len, 1)
+            old_logp_flat = masked_chunk_logprob(
+                old_logp_chunk[env_ids, chunk_ids],
+                old_valid_chunk[env_ids, chunk_ids].squeeze(-1),
+            ).to(device)
+            valid_chunk_flat = chunk_valid.any(dim=2)[env_ids, chunk_ids].to(device)
+            valid_action_flat = chunk_valid[env_ids, chunk_ids].to(device)
+            adv_flat = advantages[env_ids, chunk_ids].to(device)
+            ret_flat = returns[env_ids, chunk_ids].to(device)
 
             total_policy_loss = 0.0
             total_value_loss = 0.0
             total_entropy = 0.0
             total_grad_norm = 0.0
+            total_actor_grad_norm = 0.0
+            total_critic_grad_norm = 0.0
+            ratio_values = []
+            approx_kl_values = []
+            clip_values = []
+            log_std_values = []
             total_mb = 0
             batch_size = max(1, min(args.minibatch_envs, flat_count))
             for _epoch in range(args.update_epochs):
                 perm = torch.randperm(flat_count)
                 for start in range(0, flat_count, batch_size):
                     idx = perm[start : start + batch_size]
+                    valid_idx = valid_chunk_flat[idx.to(device)]
+                    if not bool(valid_idx.any()):
+                        continue
                     idx_device = idx.to(device)
                     forward_inputs = tensorize_forward_inputs(rollout_inputs, idx)
                     out = model.default_forward(forward_inputs)
-                    logp = out["logprobs"].sum(dim=(1, 2))
+                    mb_valid = valid_action_flat[idx_device].unsqueeze(-1).float()
+                    logp = masked_chunk_logprob(out["logprobs"], valid_action_flat[idx_device])
                     values_new = out["values"].reshape(-1)
-                    entropy = out["entropy"].mean()
+                    entropy = (out["entropy"] * mb_valid).sum() / mb_valid.sum().clamp_min(1.0)
                     ratio = torch.exp(logp - old_logp_flat[idx_device])
-                    pg1 = ratio * adv_flat[idx_device]
-                    pg2 = (
-                        torch.clamp(ratio, 1 - args.clip_ratio, 1 + args.clip_ratio)
-                        * adv_flat[idx_device]
-                    )
-                    policy_loss = -torch.min(pg1, pg2).mean()
+                    effective = valid_idx.float()
+                    if train_actor and not args.noop_policy:
+                        pg1 = ratio * adv_flat[idx_device]
+                        pg2 = (
+                            torch.clamp(ratio, 1 - args.clip_ratio, 1 + args.clip_ratio)
+                            * adv_flat[idx_device]
+                        )
+                        policy_loss = -(
+                            torch.min(pg1, pg2) * effective
+                        ).sum() / effective.sum().clamp_min(1.0)
+                        entropy_loss_term = args.entropy_coef * entropy
+                    else:
+                        policy_loss = torch.zeros((), device=device)
+                        entropy_loss_term = torch.zeros((), device=device)
                     value_loss = torch.nn.functional.mse_loss(
-                        values_new.float(), ret_flat[idx_device].float()
+                        values_new[valid_idx].float(), ret_flat[idx_device][valid_idx].float()
                     )
-                    loss = policy_loss + args.value_coef * value_loss - args.entropy_coef * entropy
+                    loss = policy_loss + args.value_coef * value_loss - entropy_loss_term
                     if not torch.isfinite(loss):
                         raise RuntimeError(f"non-finite loss at update {update}: {loss}")
 
                     optim.zero_grad(set_to_none=True)
                     loss.backward()
+                    actor_grad_norm = _grad_norm_by_name(model, None)
+                    critic_grad_norm = _grad_norm_by_name(model, "value_head")
                     grad_norm = torch.nn.utils.clip_grad_norm_(trainable, args.max_grad_norm)
                     optim.step()
 
@@ -289,9 +474,31 @@ def main() -> None:
                     total_value_loss += float(value_loss.detach().cpu())
                     total_entropy += float(entropy.detach().cpu())
                     total_grad_norm += float(grad_norm.detach().cpu())
+                    total_actor_grad_norm += actor_grad_norm
+                    total_critic_grad_norm += critic_grad_norm
+                    ratio_det = ratio.detach()[valid_idx].float().cpu()
+                    if ratio_det.numel() > 0:
+                        ratio_values.append(ratio_det)
+                        old_logp_det = old_logp_flat[idx_device].detach()[valid_idx].float().cpu()
+                        logp_det = logp.detach()[valid_idx].float().cpu()
+                        approx_kl_values.append(old_logp_det - logp_det)
+                        clip_values.append(
+                            ((ratio_det - 1.0).abs() > args.clip_ratio).float()
+                        )
+                    log_std_values.append(out["log_std"].detach().float().cpu().reshape(-1))
                     total_mb += 1
 
             elapsed = time.time() - start_time
+            param_norm_after = _trainable_param_norm(model, "all")
+            actor_param_norm_after = _trainable_param_norm(model, None)
+            critic_param_norm_after = _trainable_param_norm(model, "value_head")
+            valid_chunk_bool = chunk_valid.any(dim=2)
+            raw_adv_valid = advantages_raw[valid_chunk_bool]
+            ratio_cat = torch.cat(ratio_values) if ratio_values else torch.ones(1)
+            approx_kl_cat = torch.cat(approx_kl_values) if approx_kl_values else torch.zeros(1)
+            clip_cat = torch.cat(clip_values) if clip_values else torch.zeros(1)
+            log_std_cat = torch.cat(log_std_values) if log_std_values else torch.zeros(1)
+            action_clip = torch.cat(action_clip_fracs, dim=1) if action_clip_fracs else torch.zeros(1)
             metrics = {
                 "time_s": round(elapsed, 3),
                 "run_name": args.run_name,
@@ -299,14 +506,39 @@ def main() -> None:
                 "env_steps": update * args.num_envs * chunks_per_rollout * args.chunk_len,
                 "reward_mean": float(rewards.mean().detach().cpu()),
                 "return_mean": float(rewards.sum(dim=1).mean().detach().cpu()),
-                "adv_mean": float(advantages.mean().detach().cpu()),
-                "adv_std": float(advantages.std(unbiased=False).detach().cpu()),
+                "raw_reward_sum": float(rewards.sum().detach().cpu()),
+                "success_count": int(np.sum(successes)) if successes else 0,
+                "done_any_count": done_any_count,
+                "done_all_count": done_all_count,
+                "valid_step_frac": float(valid_mask.float().mean().detach().cpu()),
+                "adv_raw_mean": float(raw_adv_valid.mean().detach().cpu()) if raw_adv_valid.numel() else 0.0,
+                "adv_raw_std": float(raw_adv_valid.std(unbiased=False).detach().cpu()) if raw_adv_valid.numel() else 0.0,
+                "adv_mean": adv_norm_mean,
+                "adv_std": adv_norm_std,
+                "adv_norm_mean": adv_norm_mean,
+                "adv_norm_std": adv_norm_std,
                 "success_once_mean": float(np.mean(successes)) if successes else 0.0,
                 "episode_len_mean": float(np.mean(ep_lens)) if ep_lens else 0.0,
                 "policy_loss": total_policy_loss / max(total_mb, 1),
                 "value_loss": total_value_loss / max(total_mb, 1),
                 "entropy": total_entropy / max(total_mb, 1),
                 "grad_norm": total_grad_norm / max(total_mb, 1),
+                "actor_grad_norm": total_actor_grad_norm / max(total_mb, 1),
+                "critic_grad_norm": total_critic_grad_norm / max(total_mb, 1),
+                "ratio_mean": float(ratio_cat.mean().item()),
+                "ratio_min": float(ratio_cat.min().item()),
+                "ratio_max": float(ratio_cat.max().item()),
+                "approx_kl": float(approx_kl_cat.mean().item()),
+                "clip_fraction": float(clip_cat.mean().item()),
+                "log_std_mean": float(log_std_cat.mean().item()),
+                "log_std_std": float(log_std_cat.std(unbiased=False).item()),
+                "log_std_min": float(log_std_cat.min().item()),
+                "log_std_max": float(log_std_cat.max().item()),
+                "action_clip_fraction": float(action_clip.mean().item()),
+                "param_delta_norm": float(abs(param_norm_after - param_norm_before)),
+                "actor_param_delta_norm": float(abs(actor_param_norm_after - actor_param_norm_before)),
+                "critic_param_delta_norm": float(abs(critic_param_norm_after - critic_param_norm_before)),
+                "actor_update_skipped": bool((not train_actor) or args.noop_policy),
             }
             append_jsonl(metrics_path, metrics)
             if update % args.log_interval == 0:

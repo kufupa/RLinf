@@ -1,0 +1,48 @@
+#!/bin/bash
+#PBS -N smolvla-direct-s2-dense
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=16:mem=96gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=05:00:00
+#PBS -j oe
+#PBS -o logs/pbs/smolvla-direct-s2-dense.out
+
+set -euo pipefail
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+RUN_ID="${PBS_JOBID:-local}"
+RUN_DIR="${RLINF_RESULTS_DIR}/smolvla_direct_stage2_dense_${RUN_ID}"
+EVAL_DIR="${RUN_DIR}/eval"
+RUN_LOG="logs/pbs/smolvla-direct-s2-dense-${RUN_ID}.driver.log"
+
+{
+  echo "stage2_dense: train"
+  "${PYTHON_BIN}" scripts/run_smolvla_metaworld_direct_ppo.py \
+    --run-name "stage2_dense_${RUN_ID}" \
+    --output-dir "${RUN_DIR}" \
+    --num-envs 4 \
+    --steps-per-update 120 \
+    --chunk-len 5 \
+    --total-updates 25 \
+    --update-epochs 2 \
+    --minibatch-envs 4 \
+    --lr 1.0e-6 \
+    --value-lr 1.0e-4 \
+    --reward-mode dense_return \
+    --no-use-rel-reward \
+    --save-initial-checkpoint \
+    --save-interval 5 \
+    --max-runtime-s 12600
+
+  echo "stage2_dense: eval"
+  "${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+    --run-name "stage2_dense_eval_${RUN_ID}" \
+    --checkpoint-dir "${RUN_DIR}/checkpoints" \
+    --output-dir "${EVAL_DIR}" \
+    --num-envs 25 \
+    --seed-base "${SMOLVLA_EVAL_SEED_BASE:-50000}" \
+    --include-baseline \
+    --only-updates "0,1,5,10,25"
+} 2>&1 | tee "${RUN_LOG}"

@@ -1,0 +1,34 @@
+#!/bin/bash
+#PBS -N smolvla-direct-reset-probe
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=2:mem=64gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -o logs/pbs/smolvla-direct-reset-probe.out
+
+set -euo pipefail
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+RUN_ID="${PBS_JOBID:-local}"
+RUN_DIR="${RLINF_RESULTS_DIR}/smolvla_direct_reset_probe_${RUN_ID}"
+RUN_LOG="logs/pbs/smolvla-direct-reset-probe-${RUN_ID}.driver.log"
+
+"${PYTHON_BIN}" scripts/run_smolvla_metaworld_direct_ppo.py \
+  --run-name "reset_probe_${RUN_ID}" \
+  --output-dir "${RUN_DIR}" \
+  --num-envs 4 \
+  --steps-per-update 120 \
+  --chunk-len 5 \
+  --total-updates 3 \
+  --update-epochs 1 \
+  --minibatch-envs 4 \
+  --lr 1.0e-6 \
+  --value-lr 1.0e-4 \
+  --reward-mode sparse_success_delta \
+  --use-rel-reward \
+  --save-initial-checkpoint \
+  --save-interval 1 \
+  --max-runtime-s 3600 2>&1 | tee "${RUN_LOG}"

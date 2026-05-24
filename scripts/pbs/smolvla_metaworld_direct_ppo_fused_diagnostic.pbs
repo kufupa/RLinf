@@ -1,0 +1,78 @@
+#!/bin/bash
+#PBS -N smolvla-direct-fused-diag
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=16:mem=96gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -o logs/pbs/smolvla-direct-fused-diag.out
+
+set -euo pipefail
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+RUN_ID="${PBS_JOBID:-local}"
+RUN_DIR="${RLINF_RESULTS_DIR}/smolvla_direct_fused_diag_${RUN_ID}"
+ZERO_DIR="${RUN_DIR}/zero_reward"
+LEARN_DIR="${RUN_DIR}/learn_1env"
+EVAL_ZERO_DIR="${RUN_DIR}/eval_zero"
+EVAL_LEARN_DIR="${RUN_DIR}/eval_learn"
+RUN_LOG="logs/pbs/smolvla-direct-fused-diag-${RUN_ID}.driver.log"
+
+mkdir -p "${RUN_DIR}"
+
+{
+  echo "fused_diag: zero-reward probe"
+  "${PYTHON_BIN}" scripts/run_smolvla_metaworld_direct_ppo.py \
+    --run-name "fused_zero_${RUN_ID}" \
+    --output-dir "${ZERO_DIR}" \
+    --num-envs 1 \
+    --steps-per-update 10 \
+    --chunk-len 5 \
+    --total-updates 1 \
+    --update-epochs 1 \
+    --minibatch-envs 1 \
+    --lr 1.0e-6 \
+    --value-lr 1.0e-4 \
+    --force-zero-reward \
+    --save-initial-checkpoint \
+    --save-interval 1 \
+    --max-runtime-s 1800
+
+  echo "fused_diag: learning probe"
+  "${PYTHON_BIN}" scripts/run_smolvla_metaworld_direct_ppo.py \
+    --run-name "fused_learn_${RUN_ID}" \
+    --output-dir "${LEARN_DIR}" \
+    --num-envs 1 \
+    --steps-per-update 25 \
+    --chunk-len 5 \
+    --total-updates 5 \
+    --update-epochs 1 \
+    --minibatch-envs 1 \
+    --lr 1.0e-6 \
+    --value-lr 1.0e-4 \
+    --save-initial-checkpoint \
+    --save-interval 1 \
+    --max-runtime-s 3600
+
+  echo "fused_diag: eval zero probe checkpoints"
+  "${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+    --run-name "fused_zero_eval_${RUN_ID}" \
+    --checkpoint-dir "${ZERO_DIR}/checkpoints" \
+    --output-dir "${EVAL_ZERO_DIR}" \
+    --num-envs 25 \
+    --seed-base "${SMOLVLA_EVAL_SEED_BASE:-50000}" \
+    --include-baseline \
+    --only-updates "0,1"
+
+  echo "fused_diag: eval learning checkpoints"
+  "${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+    --run-name "fused_learn_eval_${RUN_ID}" \
+    --checkpoint-dir "${LEARN_DIR}/checkpoints" \
+    --output-dir "${EVAL_LEARN_DIR}" \
+    --num-envs 25 \
+    --seed-base "${SMOLVLA_EVAL_SEED_BASE:-50000}" \
+    --include-baseline \
+    --only-updates "0,1,5"
+} 2>&1 | tee "${RUN_LOG}"

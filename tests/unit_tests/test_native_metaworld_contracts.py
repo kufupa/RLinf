@@ -199,12 +199,7 @@ def test_native_obs_smolvla_action_shape(monkeypatch):
     assert result["prev_values"].shape == (2, 1)
 
 
-def test_native_chunk_step_steps_past_terminal_without_valid_mask(monkeypatch):
-    """Native chunk_step has no valid_action_mask; steps continue after success.
-
-    TODO: port valid_action_mask from smolvla_metaworld_env.chunk_step before
-    long native GPU training so PPO logprob/reward tails match masked RCA tests.
-    """
+def test_native_chunk_step_masks_past_terminal(monkeypatch):
     success_steps = [
         _NATIVE_RESET_WARMUP_STEPS + 2,
         _NATIVE_RESET_WARMUP_STEPS + 5,
@@ -215,19 +210,22 @@ def test_native_chunk_step_steps_past_terminal_without_valid_mask(monkeypatch):
     actions = np.zeros((2, 5, 4), dtype=np.float32)
     _obs_list, rewards, terminations, _truncations, infos_list = env.chunk_step(actions)
 
+    # Five chunk indices => five vector step calls; env 0 stops after index 1.
     assert fake_env.chunk_step_calls == 5
-    assert "valid_action_mask" not in infos_list[-1]
+    assert fake_env._steps[0] == success_steps[0]
+    assert fake_env._steps[1] == success_steps[1]
+    valid_mask = infos_list[-1]["valid_action_mask"]
+    assert valid_mask.shape == (2, 5)
+    assert bool(valid_mask[0, 0])
+    assert bool(valid_mask[0, 1])
+    assert not bool(valid_mask[0, 2:].any())
 
-    # Env 0 succeeds on chunk index 1; native env keeps stepping through index 4.
     assert bool(terminations[0, 1])
-    assert bool(terminations[0, 2:].all())
     torch.testing.assert_close(
         rewards[0],
         torch.tensor([0.0, 1.0, 0.0, 0.0, 0.0]),
     )
-
-    # SmolVLA adapter would mask tail; native currently does not.
-    assert terminations.shape == (2, 5)
+    assert infos_list[-1]["all_rows_terminal"] is True
 
 
 def test_single_task_benchmark_covered_elsewhere():

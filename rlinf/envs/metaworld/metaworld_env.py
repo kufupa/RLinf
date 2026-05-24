@@ -23,6 +23,7 @@ import gymnasium as gym
 import metaworld
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 
 from rlinf.envs.metaworld import MetaWorldBenchmark
 from rlinf.envs.metaworld.venv import ReconfigureSubprocEnv
@@ -57,8 +58,19 @@ class MetaWorldEnv(gym.Env):
         self._generator_ordered = np.random.default_rng(seed=0)
 
         self.RESET_STEP = 15
+        benchmark_kwargs = {}
+        if OmegaConf.select(self.cfg, "task_names") is not None:
+            task_names_raw = OmegaConf.to_container(self.cfg.task_names, resolve=True)
+            benchmark_kwargs["task_names"] = (
+                task_names_raw
+                if isinstance(task_names_raw, list)
+                else [task_names_raw]
+            )
+        if OmegaConf.select(self.cfg, "task_num_trials") is not None:
+            benchmark_kwargs["task_num_trials"] = self.cfg.task_num_trials
         self.task_suite: MetaWorldBenchmark = MetaWorldBenchmark(
-            self.cfg.task_suite_name
+            self.cfg.task_suite_name,
+            **benchmark_kwargs,
         )
         self.num_tasks = self.task_suite.get_num_tasks()
         self.task_num_trials = self.task_suite.get_task_num_trials()
@@ -267,6 +279,7 @@ class MetaWorldEnv(gym.Env):
             "main_images": full_image_tensor,
             "states": states,
             "task_descriptions": self.task_descriptions,
+            "reset_seeds": torch.as_tensor(self.reset_state_ids, dtype=torch.long),
         }
         return obs
 

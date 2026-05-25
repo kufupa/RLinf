@@ -19,6 +19,8 @@ cluster:
     address: auto
     temp_dir: null
     include_dashboard: null
+    num_cpus: null
+    object_store_memory: null
   component_placement:
     actor,env,rollout: all
 

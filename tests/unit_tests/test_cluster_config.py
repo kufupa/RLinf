@@ -60,6 +60,8 @@ def test_cluster_config_parses_ray_init_config():
                 "address": "local",
                 "temp_dir": "/tmp/rlinf_ray_test",
                 "include_dashboard": False,
+                "num_cpus": 4,
+                "object_store_memory": 2000000000,
             },
         }
     )
@@ -70,6 +72,8 @@ def test_cluster_config_parses_ray_init_config():
     assert parsed.ray.address == "local"
     assert parsed.ray.temp_dir == "/tmp/rlinf_ray_test"
     assert parsed.ray.include_dashboard is False
+    assert parsed.ray.num_cpus == 4
+    assert parsed.ray.object_store_memory == 2000000000
 
 
 def test_cluster_config_defaults_ray_to_auto():
@@ -81,6 +85,8 @@ def test_cluster_config_defaults_ray_to_auto():
     assert parsed.ray.address == "auto"
     assert parsed.ray.temp_dir is None
     assert parsed.ray.include_dashboard is None
+    assert parsed.ray.num_cpus is None
+    assert parsed.ray.object_store_memory is None
 
 
 def test_cluster_builds_default_auto_ray_init_kwargs():
@@ -99,6 +105,8 @@ def test_cluster_builds_local_ray_init_kwargs():
         address="local",
         temp_dir="/tmp/rlinf_ray_123",
         include_dashboard=False,
+        num_cpus=4,
+        object_store_memory=2000000000,
     )
 
     kwargs = Cluster._build_ray_init_kwargs(cfg, runtime_env={"env_vars": {"A": "B"}})
@@ -106,6 +114,8 @@ def test_cluster_builds_local_ray_init_kwargs():
     assert kwargs["address"] == "local"
     assert kwargs["_temp_dir"] == "/tmp/rlinf_ray_123"
     assert kwargs["include_dashboard"] is False
+    assert kwargs["num_cpus"] == 4
+    assert kwargs["object_store_memory"] == 2000000000
     assert kwargs["runtime_env"] == {"env_vars": {"A": "B"}}
 
 

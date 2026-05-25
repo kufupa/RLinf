@@ -299,11 +299,21 @@ class RayInitConfig:
     include_dashboard: Optional[bool] = None
     """Optional Ray dashboard toggle passed to ray.init."""
 
+    num_cpus: Optional[int] = None
+    """Optional CPU count passed to ray.init for local/job-private Ray."""
+
+    object_store_memory: Optional[int] = None
+    """Optional object store bytes passed to ray.init."""
+
     def __post_init__(self):
         if self.address is not None:
             self.address = str(self.address)
         if self.temp_dir is not None:
             self.temp_dir = str(self.temp_dir)
+        if self.num_cpus is not None:
+            self.num_cpus = int(self.num_cpus)
+        if self.object_store_memory is not None:
+            self.object_store_memory = int(self.object_store_memory)
 
 
 @dataclass

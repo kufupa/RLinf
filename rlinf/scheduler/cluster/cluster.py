@@ -312,6 +312,10 @@ class Cluster:
             kwargs["_temp_dir"] = ray_cfg.temp_dir
         if ray_cfg.include_dashboard is not None:
             kwargs["include_dashboard"] = ray_cfg.include_dashboard
+        if ray_cfg.num_cpus is not None:
+            kwargs["num_cpus"] = ray_cfg.num_cpus
+        if ray_cfg.object_store_memory is not None:
+            kwargs["object_store_memory"] = ray_cfg.object_store_memory
         return kwargs
 
     def _init_and_launch_managers(

@@ -243,7 +243,9 @@ class MetaWorldEnv(gym.Env):
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
         episode_info["episode_len"] = self.elapsed_steps.copy()
-        episode_info["reward"] = episode_info["return"] / episode_info["episode_len"]
+        episode_info["reward"] = episode_info["return"] / np.maximum(
+            episode_info["episode_len"], 1
+        )
         infos["episode"] = to_tensor(episode_info)
         return infos
 

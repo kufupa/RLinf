@@ -2,7 +2,7 @@
 #PBS -N native-mw-smoke
 #PBS -q v1_gpu72
 #PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
-#PBS -l walltime=01:00:00
+#PBS -l walltime=03:00:00
 #PBS -j oe
 #PBS -o logs/pbs/native-metaworld-smoke.out
 
@@ -14,6 +14,7 @@ setup_smolvla_metaworld_env
 
 RUN_ID="${PBS_JOBID:-local}"
 RUN_LOG="logs/pbs/native-metaworld-smoke-${RUN_ID}.driver.log"
+export RLINF_STAGE_DIAG=1
 
 "${PYTHON_BIN}" examples/embodiment/train_embodied_agent.py \
   --config-path "${EMBODIED_PATH}/config/" \

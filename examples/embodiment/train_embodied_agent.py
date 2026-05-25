@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import json
+import os
+import time
 
 import hydra
 import torch.multiprocessing as mp
@@ -28,19 +30,31 @@ from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 mp.set_start_method("spawn", force=True)
 
 
+def _stage(message: str) -> None:
+    if os.environ.get("RLINF_STAGE_DIAG", "0") == "1":
+        print(f"[rlinf-stage {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
 @hydra.main(
     version_base="1.1", config_path="config", config_name="maniskill_ppo_openvlaoft"
 )
 def main(cfg) -> None:
+    _stage("validate_cfg:start")
     cfg = validate_cfg(cfg)
-    print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2))
+    _stage("validate_cfg:done")
+    print(json.dumps(OmegaConf.to_container(cfg, resolve=True), indent=2), flush=True)
 
+    _stage("cluster:init:start")
     cluster = Cluster(
         cluster_cfg=cfg.cluster, distributed_log_dir=cfg.runner.per_worker_log_path
     )
+    _stage("cluster:init:done")
+    _stage("placement:init:start")
     component_placement = HybridComponentPlacement(cfg, cluster)
+    _stage("placement:init:done")
 
     # Create actor worker group
+    _stage("actor_group:launch:start")
     actor_placement = component_placement.get_strategy("actor")
 
     if cfg.algorithm.loss_type == "embodied_sac":
@@ -64,18 +78,23 @@ def main(cfg) -> None:
     actor_group = actor_worker_cls.create_group(cfg).launch(
         cluster, name=cfg.actor.group_name, placement_strategy=actor_placement
     )
+    _stage("actor_group:launch:done")
 
     # Create rollout worker group
+    _stage("rollout_group:launch:start")
     rollout_placement = component_placement.get_strategy("rollout")
     rollout_group = MultiStepRolloutWorker.create_group(cfg).launch(
         cluster, name=cfg.rollout.group_name, placement_strategy=rollout_placement
     )
+    _stage("rollout_group:launch:done")
 
     # Create env worker group
+    _stage("env_group:launch:start")
     env_placement = component_placement.get_strategy("env")
     env_group = EnvWorker.create_group(cfg).launch(
         cluster, name=cfg.env.group_name, placement_strategy=env_placement
     )
+    _stage("env_group:launch:done")
 
     reward_group = None
     if cfg.get("reward", {}).get("use_reward_model", False) and not cfg.get(
@@ -97,8 +116,12 @@ def main(cfg) -> None:
         reward=reward_group,
     )
 
+    _stage("runner.init_workers:start")
     runner.init_workers()
+    _stage("runner.init_workers:done")
+    _stage("runner.run:start")
     runner.run()
+    _stage("runner.run:done")
 
 
 if __name__ == "__main__":

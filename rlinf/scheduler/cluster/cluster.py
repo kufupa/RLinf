@@ -42,6 +42,12 @@ assert vs.parse(ray_version) >= vs.parse("2.47.0"), (
     "Ray version 2.47.0 or higher is required. Run pip install ray[default]==2.47.0"
 )
 
+
+def _stage(message: str) -> None:
+    if os.environ.get("RLINF_STAGE_DIAG", "0") == "1":
+        print(f"[rlinf-cluster {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
 if TYPE_CHECKING:
     from ..manager import Manager
     from ..worker import Worker
@@ -376,6 +382,7 @@ class Cluster:
             self._cluster_cfg.ray if self._cluster_cfg else None,
             runtime_env=ray_runtime_env,
         )
+        _stage(f"ray.init:start kwargs={sorted(ray_init_kwargs.keys())}")
         try:
             ray.init(**ray_init_kwargs)
         except ConnectionError:
@@ -388,6 +395,7 @@ class Cluster:
             if ray_runtime_env is not None:
                 fallback_kwargs["runtime_env"] = ray_runtime_env
             ray.init(**fallback_kwargs)
+        _stage("ray.init:done")
 
         # Ray log collector
         if distributed_log_dir is not None:
@@ -410,7 +418,9 @@ class Cluster:
             time.sleep(1)
 
         # Get node info
+        _stage("node_probe:start")
         self._node_probe = NodeProbe(self._num_nodes, self._cluster_cfg)
+        _stage("node_probe:done")
         self._nodes = self._node_probe.nodes
         self._node_groups = self._node_probe.node_groups
 
@@ -439,12 +449,15 @@ class Cluster:
         try:
             runtime_env = {"env_vars": Manager.get_runtime_env_vars()}
             manager_node = self._get_manager_node(self._nodes)
+            _stage("manager:worker:start")
             self._worker_manager = self._launch_manager_actor(
                 WorkerManager, manager_node, runtime_env
             )
+            _stage("manager:collective:start")
             self._coll_manager = self._launch_manager_actor(
                 CollectiveManager, manager_node, runtime_env
             )
+            _stage("manager:node:start")
             self._node_manager = self._launch_manager_actor(
                 NodeManager,
                 manager_node,
@@ -453,12 +466,15 @@ class Cluster:
                 self._node_groups,
                 self._cluster_cfg,
             )
+            _stage("manager:device_lock:start")
             self._device_lock_manager = self._launch_manager_actor(
                 DeviceLockManager, manager_node, runtime_env
             )
+            _stage("manager:port_lock:start")
             self._port_lock_manager = self._launch_manager_actor(
                 PortLockManager, manager_node, runtime_env
             )
+            _stage("manager:all:launched")
         except ValueError:
             raise Cluster.NamespaceConflictError
 

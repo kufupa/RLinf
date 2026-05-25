@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N native-mw-egl
 #PBS -q v1_gpu72
-#PBS -l select=1:ncpus=8:mem=64gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l select=1:ncpus=4:mem=48gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
 #PBS -l walltime=03:00:00
 #PBS -j oe
 #PBS -o logs/pbs/native-metaworld-egl-microbench.out
@@ -26,8 +26,8 @@ RUN_LOG="logs/pbs/native-metaworld-egl-microbench-${RUN_ID}.driver.log"
   cluster.ray.address=local \
   cluster.ray.temp_dir="${RAY_TMPDIR}" \
   cluster.ray.include_dashboard=false \
-  cluster.ray.num_cpus=8 \
-  cluster.ray.object_store_memory=4000000000 \
+  cluster.ray.num_cpus=4 \
+  cluster.ray.object_store_memory=2000000000 \
   runner.logger.log_path="${RLINF_RESULTS_DIR}/native_metaworld_egl_microbench_${RUN_ID}" \
   runner.logger.experiment_name="native_metaworld_pushv3_egl_microbench" \
   runner.logger.logger_backends=[] \

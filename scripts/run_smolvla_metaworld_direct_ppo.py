@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import time
+from collections import defaultdict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +18,7 @@ from rlinf.models.embodiment.smolvla import get_model
 
 
 DEFAULT_CHECKPOINT = (
-    "/rds/general/user/aa6622/home/.cache/huggingface/hub/"
-    "models--jadechoghari--smolvla_metaworld/snapshots/"
-    "ef3089ecb84eeeb7d33fedab24f6c76180a68900"
+    "jadechoghari/smolvla_metaworld"
 )
 
 
@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noop-policy", action="store_true")
     parser.add_argument("--force-zero-reward", action="store_true")
     parser.add_argument("--save-initial-checkpoint", action="store_true")
+    parser.add_argument("--resume-checkpoint", default="")
     parser.add_argument("--advantage-mode", choices=("gae", "mc"), default="gae")
     parser.add_argument("--lr", type=float, default=5e-6)
     parser.add_argument("--value-lr", type=float, default=1e-4)
@@ -57,6 +58,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-interval", type=int, default=10)
     parser.add_argument("--log-interval", type=int, default=1)
     return parser.parse_args()
+
+
+class TimingStats:
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.totals: dict[str, float] = defaultdict(float)
+        self.counts: dict[str, int] = defaultdict(int)
+
+    def _sync(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    @contextmanager
+    def time(self, name: str):
+        self._sync()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._sync()
+            self.totals[name] += time.perf_counter() - start
+            self.counts[name] += 1
+
+    def payload(self) -> dict[str, Any]:
+        total = sum(self.totals.values())
+        return {
+            "total_timed_s": round(total, 6),
+            "totals_s": {key: round(value, 6) for key, value in sorted(self.totals.items())},
+            "counts": {key: int(value) for key, value in sorted(self.counts.items())},
+            "avg_s": {
+                key: round(self.totals[key] / max(self.counts[key], 1), 6)
+                for key in sorted(self.totals)
+            },
+        }
 
 
 def make_env(args: argparse.Namespace) -> SmolVLAMetaWorldEnv:
@@ -252,6 +287,36 @@ def save_checkpoint(
     tmp.replace(latest)
 
 
+def load_trainable_checkpoint(
+    model: torch.nn.Module,
+    optim: torch.optim.Optimizer,
+    checkpoint_path: str,
+    device: torch.device,
+) -> tuple[int, dict[str, Any]]:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    trainable_state = checkpoint.get("trainable_model")
+    if not isinstance(trainable_state, dict):
+        raise KeyError(f"{checkpoint_path} missing trainable_model")
+
+    named_params = dict(model.named_parameters())
+    with torch.no_grad():
+        for name, tensor in trainable_state.items():
+            if name not in named_params:
+                raise KeyError(f"{checkpoint_path} has unknown param {name}")
+            param = named_params[name]
+            param.copy_(tensor.to(device=param.device, dtype=param.dtype))
+
+    optimizer_state = checkpoint.get("optimizer")
+    if isinstance(optimizer_state, dict):
+        optim.load_state_dict(optimizer_state)
+        for state in optim.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device=device)
+
+    return int(checkpoint.get("update", 0)), checkpoint.get("metrics", {})
+
+
 def append_jsonl(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -284,9 +349,11 @@ def main() -> None:
     start_time = time.time()
 
     try:
-        obs, _ = env.reset()
         steps_per_rollout = max(args.chunk_len, args.steps_per_update)
         chunks_per_rollout = max(1, steps_per_rollout // args.chunk_len)
+        init_timers = TimingStats(device)
+        with init_timers.time("env_reset"):
+            obs, _ = env.reset()
         metrics: dict[str, Any] = {
             "time_s": 0.0,
             "run_name": args.run_name,
@@ -299,7 +366,32 @@ def main() -> None:
         }
         if args.save_initial_checkpoint:
             save_checkpoint(output_dir, model, optim, 0, metrics)
-        for update in range(1, args.total_updates + 1):
+        start_update = 0
+        if args.resume_checkpoint:
+            start_update, resume_metrics = load_trainable_checkpoint(
+                model, optim, args.resume_checkpoint, device
+            )
+            metrics.update(
+                {
+                    "resume_checkpoint": args.resume_checkpoint,
+                    "resume_from_update": start_update,
+                    "source_metrics": resume_metrics,
+                }
+            )
+            print(
+                "direct_ppo: resumed "
+                + json.dumps(
+                    {
+                        "checkpoint": args.resume_checkpoint,
+                        "start_update": start_update,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            save_checkpoint(output_dir, model, optim, start_update, metrics)
+
+        for update in range(start_update + 1, args.total_updates + 1):
             rollout_inputs: list[dict[str, torch.Tensor]] = []
             rollout_old_logp: list[torch.Tensor] = []
             rollout_values: list[torch.Tensor] = []
@@ -315,105 +407,119 @@ def main() -> None:
             param_norm_before = _trainable_param_norm(model, "all")
             actor_param_norm_before = _trainable_param_norm(model, None)
             critic_param_norm_before = _trainable_param_norm(model, "value_head")
+            timers = TimingStats(device)
+            if update == start_update + 1:
+                timers.totals.update(init_timers.totals)
+                timers.counts.update(init_timers.counts)
 
             for _ in range(chunks_per_rollout):
-                actions, policy_out = model.predict_action_batch(obs, mode="train")
-                out = model.default_forward(policy_out["forward_inputs"])
-                chunk_actions = actions.detach().cpu().numpy()
-                obs_list, rewards, terms, truncs, infos_list = env.chunk_step(chunk_actions)
+                with timers.time("policy_predict_action_batch"):
+                    actions, policy_out = model.predict_action_batch(obs, mode="train")
+                with timers.time("rollout_old_logprob_value_forward"):
+                    out = model.default_forward(policy_out["forward_inputs"])
+                with timers.time("action_cpu_transfer"):
+                    chunk_actions = actions.detach().cpu().numpy()
+                with timers.time("env_chunk_step"):
+                    obs_list, rewards, terms, truncs, infos_list = env.chunk_step(chunk_actions)
                 if args.force_zero_reward:
                     rewards = torch.zeros_like(rewards)
-                valid_mask = infos_list[-1].get(
-                    "valid_action_mask",
-                    torch.ones_like(rewards, dtype=torch.bool),
-                )
-                valid_mask_cpu = valid_mask.detach().cpu().bool()
-                rollout_inputs.append(policy_out["forward_inputs"])
-                rollout_old_logp.append(policy_out["prev_logprobs"].detach().cpu())
-                rollout_values.append(out["values"].detach().cpu())
-                rollout_rewards.append(rewards.detach().cpu())
-                rollout_dones.append((terms | truncs).detach().cpu())
-                rollout_valid_masks.append(valid_mask_cpu)
-                rollout_entropy.append(out["entropy"].detach().cpu())
-                done_chunk = (terms | truncs).detach().cpu()
-                done_any_count += int(done_chunk.any().item())
-                done_all_count += int(done_chunk.all(dim=0).sum().item())
-                action_clip_fracs.append(
-                    torch.as_tensor(
-                        np.isclose(chunk_actions, -1.0) | np.isclose(chunk_actions, 1.0),
-                        dtype=torch.float32,
+                with timers.time("rollout_storage"):
+                    valid_mask = infos_list[-1].get(
+                        "valid_action_mask",
+                        torch.ones_like(rewards, dtype=torch.bool),
                     )
-                    .mean(dim=2)
-                    .cpu()
-                )
-                final_info = infos_list[-1].get("episode", {})
-                if "success_once" in final_info:
-                    successes.extend(final_info["success_once"].detach().cpu().numpy().astype(float).tolist())
-                if "episode_len" in final_info:
-                    ep_lens.extend(final_info["episode_len"].detach().cpu().numpy().astype(float).tolist())
-                obs = obs_list[-1]
+                    valid_mask_cpu = valid_mask.detach().cpu().bool()
+                    rollout_inputs.append(policy_out["forward_inputs"])
+                    rollout_old_logp.append(policy_out["prev_logprobs"].detach().cpu())
+                    rollout_values.append(out["values"].detach().cpu())
+                    rollout_rewards.append(rewards.detach().cpu())
+                    rollout_dones.append((terms | truncs).detach().cpu())
+                    rollout_valid_masks.append(valid_mask_cpu)
+                    rollout_entropy.append(out["entropy"].detach().cpu())
+                    done_chunk = (terms | truncs).detach().cpu()
+                    done_any_count += int(done_chunk.any().item())
+                    done_all_count += int(done_chunk.all(dim=0).sum().item())
+                    action_clip_fracs.append(
+                        torch.as_tensor(
+                            np.isclose(chunk_actions, -1.0) | np.isclose(chunk_actions, 1.0),
+                            dtype=torch.float32,
+                        )
+                        .mean(dim=2)
+                        .cpu()
+                    )
+                    final_info = infos_list[-1].get("episode", {})
+                    if "success_once" in final_info:
+                        successes.extend(final_info["success_once"].detach().cpu().numpy().astype(float).tolist())
+                    if "episode_len" in final_info:
+                        ep_lens.extend(final_info["episode_len"].detach().cpu().numpy().astype(float).tolist())
+                    obs = obs_list[-1]
                 if bool(infos_list[-1].get("all_rows_terminal", False)) or bool((terms | truncs).all()):
-                    obs, _ = env.reset()
+                    with timers.time("env_reset"):
+                        obs, _ = env.reset()
 
-            old_logp = torch.cat(rollout_old_logp, dim=1).to(device)
-            values_chunk = torch.cat(rollout_values, dim=0).reshape(chunks_per_rollout, args.num_envs).T
-            rewards = torch.cat(rollout_rewards, dim=1).to(device)
-            dones = torch.cat(rollout_dones, dim=1).to(device)
-            valid_mask = torch.cat(rollout_valid_masks, dim=1).to(device).bool()
+            with timers.time("rollout_collate"):
+                old_logp = torch.cat(rollout_old_logp, dim=1).to(device)
+                values_chunk = torch.cat(rollout_values, dim=0).reshape(chunks_per_rollout, args.num_envs).T
+                rewards = torch.cat(rollout_rewards, dim=1).to(device)
+                dones = torch.cat(rollout_dones, dim=1).to(device)
+                valid_mask = torch.cat(rollout_valid_masks, dim=1).to(device).bool()
             if not bool(valid_mask.any()):
-                obs, _ = env.reset()
+                with timers.time("env_reset"):
+                    obs, _ = env.reset()
                 raise RuntimeError(
                     f"rollout at update {update} has zero valid steps after terminal masking"
                 )
-            chunk_valid = valid_mask.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)
-            rewards_chunk = (
-                rewards.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)
-                * chunk_valid.float()
-            ).sum(dim=2)
-            dones_chunk = dones.reshape(args.num_envs, chunks_per_rollout, args.chunk_len).any(dim=2)
-            values = values_chunk.to(device)
-            if args.advantage_mode == "gae":
-                advantages_raw, returns = compute_gae(
-                    rewards_chunk,
-                    values,
-                    dones_chunk,
-                    chunk_valid.any(dim=2),
-                    args.gamma ** args.chunk_len,
-                    args.gae_lambda,
-                )
-            else:
-                returns = compute_discounted_returns(
-                    rewards_chunk,
-                    dones_chunk,
-                    chunk_valid.any(dim=2),
-                    args.gamma ** args.chunk_len,
-                )
-                advantages_raw = returns.detach()
-            train_actor = should_update_actor(rewards, valid_mask)
-            if train_actor:
-                advantages, adv_norm_mean, adv_norm_std = normalize_advantages(
-                    advantages_raw,
-                    chunk_valid.any(dim=2),
-                )
-            else:
-                advantages = torch.zeros_like(advantages_raw)
-                adv_norm_mean = 0.0
-                adv_norm_std = 0.0
+            with timers.time("advantage_compute"):
+                chunk_valid = valid_mask.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)
+                rewards_chunk = (
+                    rewards.reshape(args.num_envs, chunks_per_rollout, args.chunk_len)
+                    * chunk_valid.float()
+                ).sum(dim=2)
+                dones_chunk = dones.reshape(args.num_envs, chunks_per_rollout, args.chunk_len).any(dim=2)
+                values = values_chunk.to(device)
+                if args.advantage_mode == "gae":
+                    advantages_raw, returns = compute_gae(
+                        rewards_chunk,
+                        values,
+                        dones_chunk,
+                        chunk_valid.any(dim=2),
+                        args.gamma ** args.chunk_len,
+                        args.gae_lambda,
+                    )
+                else:
+                    returns = compute_discounted_returns(
+                        rewards_chunk,
+                        dones_chunk,
+                        chunk_valid.any(dim=2),
+                        args.gamma ** args.chunk_len,
+                    )
+                    advantages_raw = returns.detach()
+                train_actor = should_update_actor(rewards, valid_mask)
+                if train_actor:
+                    advantages, adv_norm_mean, adv_norm_std = normalize_advantages(
+                        advantages_raw,
+                        chunk_valid.any(dim=2),
+                    )
+                else:
+                    advantages = torch.zeros_like(advantages_raw)
+                    adv_norm_mean = 0.0
+                    adv_norm_std = 0.0
 
-            flat_count = args.num_envs * chunks_per_rollout
-            flat_indices = torch.arange(flat_count)
-            env_ids = flat_indices % args.num_envs
-            chunk_ids = flat_indices // args.num_envs
-            old_logp_chunk = old_logp.reshape(args.num_envs, chunks_per_rollout, args.chunk_len, 4)
-            old_valid_chunk = chunk_valid.reshape(args.num_envs, chunks_per_rollout, args.chunk_len, 1)
-            old_logp_flat = masked_chunk_logprob(
-                old_logp_chunk[env_ids, chunk_ids],
-                old_valid_chunk[env_ids, chunk_ids].squeeze(-1),
-            ).to(device)
-            valid_chunk_flat = chunk_valid.any(dim=2)[env_ids, chunk_ids].to(device)
-            valid_action_flat = chunk_valid[env_ids, chunk_ids].to(device)
-            adv_flat = advantages[env_ids, chunk_ids].to(device)
-            ret_flat = returns[env_ids, chunk_ids].to(device)
+            with timers.time("ppo_batch_prepare"):
+                flat_count = args.num_envs * chunks_per_rollout
+                flat_indices = torch.arange(flat_count)
+                env_ids = flat_indices % args.num_envs
+                chunk_ids = flat_indices // args.num_envs
+                old_logp_chunk = old_logp.reshape(args.num_envs, chunks_per_rollout, args.chunk_len, 4)
+                old_valid_chunk = chunk_valid.reshape(args.num_envs, chunks_per_rollout, args.chunk_len, 1)
+                old_logp_flat = masked_chunk_logprob(
+                    old_logp_chunk[env_ids, chunk_ids],
+                    old_valid_chunk[env_ids, chunk_ids].squeeze(-1),
+                ).to(device)
+                valid_chunk_flat = chunk_valid.any(dim=2)[env_ids, chunk_ids].to(device)
+                valid_action_flat = chunk_valid[env_ids, chunk_ids].to(device)
+                adv_flat = advantages[env_ids, chunk_ids].to(device)
+                ret_flat = returns[env_ids, chunk_ids].to(device)
 
             total_policy_loss = 0.0
             total_value_loss = 0.0
@@ -435,58 +541,65 @@ def main() -> None:
                     if not bool(valid_idx.any()):
                         continue
                     idx_device = idx.to(device)
-                    forward_inputs = tensorize_forward_inputs(rollout_inputs, idx)
-                    out = model.default_forward(forward_inputs)
-                    mb_valid = valid_action_flat[idx_device].unsqueeze(-1).float()
-                    logp = masked_chunk_logprob(out["logprobs"], valid_action_flat[idx_device])
-                    values_new = out["values"].reshape(-1)
-                    entropy = (out["entropy"] * mb_valid).sum() / mb_valid.sum().clamp_min(1.0)
-                    ratio = torch.exp(logp - old_logp_flat[idx_device])
-                    effective = valid_idx.float()
-                    if train_actor and not args.noop_policy:
-                        pg1 = ratio * adv_flat[idx_device]
-                        pg2 = (
-                            torch.clamp(ratio, 1 - args.clip_ratio, 1 + args.clip_ratio)
-                            * adv_flat[idx_device]
+                    with timers.time("ppo_minibatch_collate"):
+                        forward_inputs = tensorize_forward_inputs(rollout_inputs, idx)
+                    with timers.time("ppo_minibatch_forward"):
+                        out = model.default_forward(forward_inputs)
+                        mb_valid = valid_action_flat[idx_device].unsqueeze(-1).float()
+                        logp = masked_chunk_logprob(out["logprobs"], valid_action_flat[idx_device])
+                        values_new = out["values"].reshape(-1)
+                        entropy = (out["entropy"] * mb_valid).sum() / mb_valid.sum().clamp_min(1.0)
+                        ratio = torch.exp(logp - old_logp_flat[idx_device])
+                        effective = valid_idx.float()
+                        if train_actor and not args.noop_policy:
+                            pg1 = ratio * adv_flat[idx_device]
+                            pg2 = (
+                                torch.clamp(ratio, 1 - args.clip_ratio, 1 + args.clip_ratio)
+                                * adv_flat[idx_device]
+                            )
+                            policy_loss = -(
+                                torch.min(pg1, pg2) * effective
+                            ).sum() / effective.sum().clamp_min(1.0)
+                            entropy_loss_term = args.entropy_coef * entropy
+                        else:
+                            policy_loss = torch.zeros((), device=device)
+                            entropy_loss_term = torch.zeros((), device=device)
+                        value_loss = torch.nn.functional.mse_loss(
+                            values_new[valid_idx].float(), ret_flat[idx_device][valid_idx].float()
                         )
-                        policy_loss = -(
-                            torch.min(pg1, pg2) * effective
-                        ).sum() / effective.sum().clamp_min(1.0)
-                        entropy_loss_term = args.entropy_coef * entropy
-                    else:
-                        policy_loss = torch.zeros((), device=device)
-                        entropy_loss_term = torch.zeros((), device=device)
-                    value_loss = torch.nn.functional.mse_loss(
-                        values_new[valid_idx].float(), ret_flat[idx_device][valid_idx].float()
-                    )
-                    loss = policy_loss + args.value_coef * value_loss - entropy_loss_term
-                    if not torch.isfinite(loss):
-                        raise RuntimeError(f"non-finite loss at update {update}: {loss}")
+                        loss = policy_loss + args.value_coef * value_loss - entropy_loss_term
+                        if not torch.isfinite(loss):
+                            raise RuntimeError(f"non-finite loss at update {update}: {loss}")
 
-                    optim.zero_grad(set_to_none=True)
-                    loss.backward()
-                    actor_grad_norm = _grad_norm_by_name(model, None)
-                    critic_grad_norm = _grad_norm_by_name(model, "value_head")
-                    grad_norm = torch.nn.utils.clip_grad_norm_(trainable, args.max_grad_norm)
-                    optim.step()
+                    with timers.time("optimizer_zero_grad"):
+                        optim.zero_grad(set_to_none=True)
+                    with timers.time("ppo_backward"):
+                        loss.backward()
+                    with timers.time("grad_norms"):
+                        actor_grad_norm = _grad_norm_by_name(model, None)
+                        critic_grad_norm = _grad_norm_by_name(model, "value_head")
+                        grad_norm = torch.nn.utils.clip_grad_norm_(trainable, args.max_grad_norm)
+                    with timers.time("optimizer_step"):
+                        optim.step()
 
-                    total_policy_loss += float(policy_loss.detach().cpu())
-                    total_value_loss += float(value_loss.detach().cpu())
-                    total_entropy += float(entropy.detach().cpu())
-                    total_grad_norm += float(grad_norm.detach().cpu())
-                    total_actor_grad_norm += actor_grad_norm
-                    total_critic_grad_norm += critic_grad_norm
-                    ratio_det = ratio.detach()[valid_idx].float().cpu()
-                    if ratio_det.numel() > 0:
-                        ratio_values.append(ratio_det)
-                        old_logp_det = old_logp_flat[idx_device].detach()[valid_idx].float().cpu()
-                        logp_det = logp.detach()[valid_idx].float().cpu()
-                        approx_kl_values.append(old_logp_det - logp_det)
-                        clip_values.append(
-                            ((ratio_det - 1.0).abs() > args.clip_ratio).float()
-                        )
-                    log_std_values.append(out["log_std"].detach().float().cpu().reshape(-1))
-                    total_mb += 1
+                    with timers.time("ppo_metric_extract"):
+                        total_policy_loss += float(policy_loss.detach().cpu())
+                        total_value_loss += float(value_loss.detach().cpu())
+                        total_entropy += float(entropy.detach().cpu())
+                        total_grad_norm += float(grad_norm.detach().cpu())
+                        total_actor_grad_norm += actor_grad_norm
+                        total_critic_grad_norm += critic_grad_norm
+                        ratio_det = ratio.detach()[valid_idx].float().cpu()
+                        if ratio_det.numel() > 0:
+                            ratio_values.append(ratio_det)
+                            old_logp_det = old_logp_flat[idx_device].detach()[valid_idx].float().cpu()
+                            logp_det = logp.detach()[valid_idx].float().cpu()
+                            approx_kl_values.append(old_logp_det - logp_det)
+                            clip_values.append(
+                                ((ratio_det - 1.0).abs() > args.clip_ratio).float()
+                            )
+                        log_std_values.append(out["log_std"].detach().float().cpu().reshape(-1))
+                        total_mb += 1
 
             elapsed = time.time() - start_time
             param_norm_after = _trainable_param_norm(model, "all")
@@ -539,12 +652,37 @@ def main() -> None:
                 "actor_param_delta_norm": float(abs(actor_param_norm_after - actor_param_norm_before)),
                 "critic_param_delta_norm": float(abs(critic_param_norm_after - critic_param_norm_before)),
                 "actor_update_skipped": bool((not train_actor) or args.noop_policy),
+                "timing": timers.payload(),
+                "call_counts": {
+                    "predict_action_batch": chunks_per_rollout,
+                    "rollout_old_logprob_value_forward": chunks_per_rollout,
+                    "ppo_forward": total_mb,
+                    "backward": total_mb,
+                    "optimizer_step": total_mb,
+                    "env_chunk_step": chunks_per_rollout,
+                    "env_step": chunks_per_rollout * args.chunk_len,
+                    "chunk_steps": chunks_per_rollout,
+                    "minibatches": total_mb,
+                },
+                "shapes": {
+                    "num_envs": args.num_envs,
+                    "steps_per_update": args.steps_per_update,
+                    "chunk_len": args.chunk_len,
+                    "chunks_per_rollout": chunks_per_rollout,
+                    "action_shape": [args.num_envs, args.chunk_len, 4],
+                    "ppo_minibatch_envs": batch_size,
+                },
             }
-            append_jsonl(metrics_path, metrics)
+            with timers.time("metrics_jsonl_write"):
+                append_jsonl(metrics_path, metrics)
             if update % args.log_interval == 0:
-                print("DIRECT_SMOLVLA_PPO_METRIC " + json.dumps(metrics, sort_keys=True), flush=True)
+                with timers.time("stdout_log"):
+                    metrics["timing"] = timers.payload()
+                    print("DIRECT_SMOLVLA_PPO_METRIC " + json.dumps(metrics, sort_keys=True), flush=True)
             if update == 1 or update % args.save_interval == 0:
-                save_checkpoint(output_dir, model, optim, update, metrics)
+                with timers.time("checkpoint_save"):
+                    metrics["timing"] = timers.payload()
+                    save_checkpoint(output_dir, model, optim, update, metrics)
             if elapsed >= args.max_runtime_s:
                 print(f"direct_ppo: max runtime reached at update={update}", flush=True)
                 break

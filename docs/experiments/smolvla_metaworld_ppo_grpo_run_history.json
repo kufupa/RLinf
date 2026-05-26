@@ -1,0 +1,144 @@
+{
+  "project": "SmolVLA + MetaWorld PPO/GRPO on RLinf",
+  "created_utc": "2026-05-26",
+  "branch_target": "smolvla-metaworld-ppo-grpo",
+  "fork_target": "https://github.com/kufupa/RLinf",
+  "model": {
+    "default_model_id": "jadechoghari/smolvla_metaworld",
+    "override_env_var": "SMOLVLA_CHECKPOINT",
+    "note": "Another cluster may use a pre-downloaded local snapshot path instead of the HF model id."
+  },
+  "runs": [
+    {
+      "name": "direct_ppo_4env_sparse_stage2",
+      "job_id": "2835191.pbs-7",
+      "pbs_script": "scripts/pbs/smolvla_metaworld_direct_ppo_stage2_sparse.pbs",
+      "runner": "scripts/run_smolvla_metaworld_direct_ppo.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 4,
+      "steps_per_update": 120,
+      "chunk_len": 5,
+      "total_updates": 25,
+      "ppo_epochs": 2,
+      "minibatch_envs": 4,
+      "lr": 1e-6,
+      "value_lr": 1e-4,
+      "reward_mode": "sparse_success_delta",
+      "relative_reward": true,
+      "eval_num_envs": 25,
+      "eval_updates": [0, 1, 5, 10, 25],
+      "checkpoint_for_resume": "update_000025.pt",
+      "raw_log_expected": "logs/pbs/smolvla-direct-s2-sparse-2835191.pbs-7.driver.log"
+    },
+    {
+      "name": "direct_ppo_4env_dense_stage2",
+      "job_id": "2835192.pbs-7",
+      "pbs_script": "scripts/pbs/smolvla_metaworld_direct_ppo_stage2_dense.pbs",
+      "runner": "scripts/run_smolvla_metaworld_direct_ppo.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 4,
+      "steps_per_update": 120,
+      "chunk_len": 5,
+      "total_updates": 25,
+      "ppo_epochs": 2,
+      "minibatch_envs": 4,
+      "lr": 1e-6,
+      "value_lr": 1e-4,
+      "reward_mode": "dense_return",
+      "relative_reward": false,
+      "eval_num_envs": 25,
+      "eval_updates": [0, 1, 5, 10, 25],
+      "raw_log_expected": "logs/pbs/smolvla-direct-s2-dense-2835192.pbs-7.driver.log"
+    },
+    {
+      "name": "direct_ppo_8env_sparse_stage3",
+      "job_id": "2835766.pbs-7",
+      "pbs_script": "scripts/pbs/smolvla_metaworld_direct_ppo_stage3_sparse_scale.pbs",
+      "runner": "scripts/run_smolvla_metaworld_direct_ppo.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 8,
+      "steps_per_update": 120,
+      "chunk_len": 5,
+      "reward_mode": "sparse_success_delta",
+      "relative_reward": true,
+      "raw_log_expected": "logs/pbs/smolvla-direct-s3-sparse-2835766.pbs-7.driver.log"
+    },
+    {
+      "name": "direct_ppo_4env_sparse_stage3b_lr3e7",
+      "job_id": "2836701.pbs-7",
+      "pbs_script": "scripts/pbs/smolvla_metaworld_direct_ppo_stage3b_sparse_lr3e7.pbs",
+      "runner": "scripts/run_smolvla_metaworld_direct_ppo.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 4,
+      "steps_per_update": 120,
+      "chunk_len": 5,
+      "total_updates": 50,
+      "ppo_epochs": 2,
+      "minibatch_envs": 4,
+      "lr": 3e-7,
+      "value_lr": 1e-4,
+      "reward_mode": "sparse_success_delta",
+      "relative_reward": true,
+      "eval_num_envs": 25,
+      "checkpoint_for_resume": "update_000050.pt",
+      "raw_log_expected": "logs/pbs/smolvla-direct-s3b-lr3e7-2836701.pbs-7.driver.log"
+    },
+    {
+      "name": "native_rlinf_ppo_4env",
+      "job_id": "2842447.pbs-7",
+      "pbs_script": "scripts/pbs/native_metaworld_pushv3_learning_4env.pbs",
+      "runner": "examples/embodiment/train_embodied_agent.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 4,
+      "purpose": "Baseline through RLinf embodied trainer stack."
+    },
+    {
+      "name": "native_rlinf_ppo_8env_scaling",
+      "job_id": "2842187.pbs-7",
+      "pbs_script": "scripts/pbs/native_metaworld_pushv3_scaling_8env.pbs",
+      "runner": "examples/embodiment/train_embodied_agent.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 8,
+      "purpose": "Scaling baseline through RLinf embodied trainer stack."
+    },
+    {
+      "name": "native_rlinf_ppo_12env_scaling",
+      "job_id": "2842188.pbs-7",
+      "pbs_script": "scripts/pbs/native_metaworld_pushv3_scaling_12env.pbs",
+      "runner": "examples/embodiment/train_embodied_agent.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 12,
+      "purpose": "Scaling baseline through RLinf embodied trainer stack."
+    },
+    {
+      "name": "native_rlinf_grpo_4env",
+      "job_id": "2842501.pbs-7",
+      "pbs_script": "scripts/pbs/native_metaworld_pushv3_grpo_learning_4env.pbs",
+      "runner": "examples/embodiment/train_embodied_agent.py",
+      "gpu_request": "1x RTX6000 on v1_gpu72",
+      "num_envs": 4,
+      "purpose": "Native MetaWorld GRPO learning attempt through RLinf embodied trainer."
+    },
+    {
+      "name": "component_benchmark",
+      "job_id": "2855898.pbs-7",
+      "pbs_script": "scripts/pbs/smolvla_metaworld_component_benchmark.pbs",
+      "runner": "scripts/benchmark_smolvla_metaworld_components.py",
+      "gpu_request": "1x L40S on v1_gpu72",
+      "modes": ["policy", "env", "rollout", "ppo"],
+      "batch_sizes": [1, 4, 8, 16, 32],
+      "purpose": "Measure policy inference, env stepping, rollout, and PPO update bottlenecks."
+    }
+  ],
+  "artifact_collection": {
+    "script": "scripts/collect_smolvla_bottleneck_artifacts.py",
+    "outputs": "logs/artifacts/smolvla_bottleneck_<UTC>/",
+    "json_prefixes": [
+      "DIRECT_SMOLVLA_PPO_METRIC",
+      "DIRECT_SMOLVLA_PPO_RUN_OK",
+      "SMOLVLA_EVAL_RESULT",
+      "SMOLVLA_EVAL_SWEEP_OK",
+      "SMOLVLA_COMPONENT_BENCH"
+    ]
+  }
+}

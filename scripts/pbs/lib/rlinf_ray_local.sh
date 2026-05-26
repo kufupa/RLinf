@@ -4,7 +4,7 @@ setup_rlinf_local_ray() {
   local run_id="${PBS_JOBID:-local}"
   local run_safe="${run_id%%.*}"
 
-  export RLINF_EPHEMERAL_BASE="${RLINF_EPHEMERAL_BASE:-/rds/general/ephemeral/user/aa6622/ephemeral/rlinf_ray_runs}"
+  export RLINF_EPHEMERAL_BASE="${RLINF_EPHEMERAL_BASE:-${TMPDIR:-/tmp}/rlinf_ray_runs}"
   export RLINF_EPHEMERAL_RUN_ROOT="${RLINF_EPHEMERAL_RUN_ROOT:-${RLINF_EPHEMERAL_BASE}/${run_safe}}"
   export RLINF_RESULTS_DIR="${RLINF_RESULTS_DIR:-${RLINF_EPHEMERAL_RUN_ROOT}/results}"
   export RAY_TMPDIR="${RAY_TMPDIR:-/tmp/rlinf_ray_${run_safe}}"

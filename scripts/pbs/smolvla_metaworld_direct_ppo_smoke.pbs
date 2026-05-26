@@ -9,7 +9,7 @@
 set -euo pipefail
 
 # shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
-source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
 setup_smolvla_metaworld_env
 
 export SMOLVLA_PPO_SMOKE_OUT="logs/smolvla_direct_ppo_smoke_${PBS_JOBID:-local}"

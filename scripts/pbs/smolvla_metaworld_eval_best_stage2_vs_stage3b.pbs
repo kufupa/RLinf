@@ -9,15 +9,15 @@
 set -euo pipefail
 
 # shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
-source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
 setup_smolvla_metaworld_env
 
 RUN_ID="${PBS_JOBID:-local}"
 RUN_LOG="logs/pbs/smolvla-eval-best-s2-s3b-${RUN_ID}.driver.log"
 OUT_ROOT="${RLINF_RESULTS_DIR}/smolvla_eval_best_s2_s3b_${RUN_ID}"
 
-S2_CKPTS="/rds/general/ephemeral/user/aa6622/ephemeral/rlinf_ray_runs/2835191/results/smolvla_direct_stage2_sparse_2835191.pbs-7/checkpoints"
-S3B_CKPTS="/rds/general/ephemeral/user/aa6622/ephemeral/rlinf_ray_runs/2836701/results/smolvla_direct_stage3b_sparse_lr3e7_2836701.pbs-7/checkpoints"
+: "${S2_CKPTS:?Set S2_CKPTS to stage2 sparse checkpoints dir}"
+: "${S3B_CKPTS:?Set S3B_CKPTS to stage3b checkpoints dir}"
 
 {
   echo "wide_eval: stage2_sparse update25"

@@ -12,7 +12,7 @@ set -euo pipefail
 : "${SMOLVLA_EVAL_CKPT_DIR:?Set SMOLVLA_EVAL_CKPT_DIR}"
 
 # shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
-source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
 setup_smolvla_metaworld_env
 
 RUN_ID="${PBS_JOBID:-local}"

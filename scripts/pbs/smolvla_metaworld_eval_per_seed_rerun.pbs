@@ -9,16 +9,16 @@
 set -euo pipefail
 
 # shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
-source "/rds/general/user/aa6622/home/project/RLinf/scripts/pbs/smolvla_metaworld_common.sh"
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
 setup_smolvla_metaworld_env
 
 RUN_ID="${PBS_JOBID:-local}"
 OUT_ROOT="${RLINF_RESULTS_DIR}/smolvla_eval_per_seed_${RUN_ID}"
 RUN_LOG="logs/pbs/smolvla-eval-seeds-${RUN_ID}.driver.log"
 
-S2_SPARSE="/rds/general/ephemeral/user/aa6622/ephemeral/rlinf_ray_runs/2835191/results/smolvla_direct_stage2_sparse_2835191.pbs-7/checkpoints"
-S2_DENSE="/rds/general/ephemeral/user/aa6622/ephemeral/rlinf_ray_runs/2835192/results/smolvla_direct_stage2_dense_2835192.pbs-7/checkpoints"
-S3B="/rds/general/ephemeral/user/aa6622/ephemeral/rlinf_ray_runs/2836701/results/smolvla_direct_stage3b_sparse_lr3e7_2836701.pbs-7/checkpoints"
+: "${S2_SPARSE:?Set S2_SPARSE to stage2 sparse checkpoints dir}"
+: "${S2_DENSE:?Set S2_DENSE to stage2 dense checkpoints dir}"
+: "${S3B:?Set S3B to stage3b checkpoints dir}"
 
 {
   echo "per_seed_rerun: stage2_sparse"

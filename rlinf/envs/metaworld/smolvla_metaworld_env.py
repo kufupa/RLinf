@@ -101,13 +101,13 @@ class SmolVLAMetaWorldEnv(gym.Env):
 
     def _make_rollout(self):
         try:
-            from smolvla_grpo.lerobot_metaworld_adapter import (
+            from rlinf.envs.metaworld.lerobot_adapter import (
                 OfficialLeRobotMetaWorldGRPORollout,
             )
         except Exception as exc:
             raise ImportError(
-                "SmolVLAMetaWorldEnv requires Phase11 SmolVLA helpers on PYTHONPATH "
-                "for the spike. Add /rds/general/user/aa6622/home/project/src."
+                "SmolVLAMetaWorldEnv requires LeRobot, MetaWorld, MuJoCo, and "
+                "Gymnasium embodied dependencies."
             ) from exc
 
         return OfficialLeRobotMetaWorldGRPORollout(

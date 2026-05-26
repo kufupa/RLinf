@@ -14,9 +14,7 @@ from rlinf.models.embodiment.smolvla import get_model
 def _checkpoint() -> str:
     return os.environ.get(
         "SMOLVLA_CHECKPOINT",
-        "/rds/general/user/aa6622/home/.cache/huggingface/hub/"
-        "models--jadechoghari--smolvla_metaworld/snapshots/"
-        "ef3089ecb84eeeb7d33fedab24f6c76180a68900",
+        "jadechoghari/smolvla_metaworld",
     )
 
 

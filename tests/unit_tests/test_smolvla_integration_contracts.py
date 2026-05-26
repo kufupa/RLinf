@@ -2,6 +2,7 @@ import math
 import sys
 import types
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -144,16 +145,14 @@ def _patch_lerobot_preprocess(monkeypatch, preprocess_fn):
 
 
 def _patch_metaworld_rollout(monkeypatch, rollout):
-    smolvla_grpo_mod = types.ModuleType("smolvla_grpo")
-    adapter_mod = types.ModuleType("smolvla_grpo.lerobot_metaworld_adapter")
-
     class Factory:
         def __new__(cls, *args, **kwargs):
             return rollout
 
-    adapter_mod.OfficialLeRobotMetaWorldGRPORollout = Factory
-    monkeypatch.setitem(sys.modules, "smolvla_grpo", smolvla_grpo_mod)
-    monkeypatch.setitem(sys.modules, "smolvla_grpo.lerobot_metaworld_adapter", adapter_mod)
+    return patch(
+        "rlinf.envs.metaworld.lerobot_adapter.OfficialLeRobotMetaWorldGRPORollout",
+        Factory,
+    )
 
 
 def test_smolvla_env_type_dispatch():
@@ -323,7 +322,6 @@ def test_metaworld_chunk_step_masks_terminal_tail(monkeypatch):
     from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
 
     rollout = FakeMetaWorldRollout(success_steps=[2, 5])
-    _patch_metaworld_rollout(monkeypatch, rollout)
     cfg = OmegaConf.create(
         {
             "seed": 0,
@@ -341,13 +339,16 @@ def test_metaworld_chunk_step_masks_terminal_tail(monkeypatch):
             "video_cfg": {"save_video": False},
         }
     )
-    env = SmolVLAMetaWorldEnv(cfg, num_envs=2, seed_offset=0, total_num_processes=1, worker_info=None)
-    try:
-        env.reset()
-        actions = np.zeros((2, 5, 4), dtype=np.float32)
-        _obs_list, rewards, terms, truncs, infos_list = env.chunk_step(actions)
-    finally:
-        env.close()
+    with _patch_metaworld_rollout(monkeypatch, rollout):
+        env = SmolVLAMetaWorldEnv(
+            cfg, num_envs=2, seed_offset=0, total_num_processes=1, worker_info=None
+        )
+        try:
+            env.reset()
+            actions = np.zeros((2, 5, 4), dtype=np.float32)
+            _obs_list, rewards, terms, truncs, infos_list = env.chunk_step(actions)
+        finally:
+            env.close()
 
     valid_mask = infos_list[-1]["valid_action_mask"]
     torch.testing.assert_close(
@@ -369,7 +370,6 @@ def test_metaworld_chunk_step_reports_all_rows_terminal(monkeypatch):
     from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
 
     rollout = FakeMetaWorldRollout(success_steps=[1, 2])
-    _patch_metaworld_rollout(monkeypatch, rollout)
     cfg = OmegaConf.create(
         {
             "seed": 0,
@@ -387,13 +387,16 @@ def test_metaworld_chunk_step_reports_all_rows_terminal(monkeypatch):
             "video_cfg": {"save_video": False},
         }
     )
-    env = SmolVLAMetaWorldEnv(cfg, num_envs=2, seed_offset=0, total_num_processes=1, worker_info=None)
-    try:
-        env.reset()
-        actions = np.zeros((2, 5, 4), dtype=np.float32)
-        _obs_list, _rewards, _terms, _truncs, infos_list = env.chunk_step(actions)
-    finally:
-        env.close()
+    with _patch_metaworld_rollout(monkeypatch, rollout):
+        env = SmolVLAMetaWorldEnv(
+            cfg, num_envs=2, seed_offset=0, total_num_processes=1, worker_info=None
+        )
+        try:
+            env.reset()
+            actions = np.zeros((2, 5, 4), dtype=np.float32)
+            _obs_list, _rewards, _terms, _truncs, infos_list = env.chunk_step(actions)
+        finally:
+            env.close()
 
     assert infos_list[-1]["all_rows_terminal"] is True
     torch.testing.assert_close(

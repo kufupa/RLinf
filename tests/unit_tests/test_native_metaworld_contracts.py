@@ -175,6 +175,16 @@ def test_native_metaworld_reset_obs_matches_smolvla_bundle(monkeypatch):
     assert proc["observation"]["state"].shape == (2, 4)
 
 
+def test_native_single_task_eval_repeats_reset_states_for_many_envs(monkeypatch):
+    env, _fake_env = _make_native_env(monkeypatch, num_envs=25, is_eval=True)
+
+    assert env.reset_state_ids.shape == (25,)
+    assert env.task_ids.shape == (25,)
+    assert env.trial_ids.shape == (25,)
+    assert np.all(env.task_ids == 0)
+    np.testing.assert_array_equal(env.trial_ids, np.tile(np.arange(10), 3)[:25])
+
+
 def test_native_obs_smolvla_action_shape(monkeypatch):
     def fake_preprocess(observation):
         pixels = torch.as_tensor(observation["pixels"], dtype=torch.float32)

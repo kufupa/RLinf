@@ -56,6 +56,7 @@ class MetaWorldEnv(gym.Env):
 
         self._generator = np.random.default_rng(seed=self.seed)
         self._generator_ordered = np.random.default_rng(seed=0)
+        self.start_idx = 0
 
         self.RESET_STEP = 15
         benchmark_kwargs = {}
@@ -173,6 +174,10 @@ class MetaWorldEnv(gym.Env):
 
     def get_reset_state_ids_all(self):
         reset_state_ids = np.arange(self.total_num_group_envs)
+        min_size = max(self.total_num_processes * self.num_group, self.total_num_processes)
+        if len(reset_state_ids) < min_size:
+            repeats = (min_size + len(reset_state_ids) - 1) // len(reset_state_ids)
+            reset_state_ids = np.tile(reset_state_ids, repeats)
         valid_size = len(reset_state_ids) - (
             len(reset_state_ids) % self.total_num_processes
         )
@@ -181,7 +186,13 @@ class MetaWorldEnv(gym.Env):
         return reset_state_ids
 
     def _get_ordered_reset_state_ids(self, num_reset_states):
-        reset_state_ids = self.reset_state_ids_all[self.seed_offset]
+        if self.start_idx + num_reset_states > len(self.reset_state_ids_all[0]):
+            self.reset_state_ids_all = self.get_reset_state_ids_all()
+            self.start_idx = 0
+        reset_state_ids = self.reset_state_ids_all[self.seed_offset][
+            self.start_idx : self.start_idx + num_reset_states
+        ]
+        self.start_idx = self.start_idx + num_reset_states
         return reset_state_ids
 
     def _get_task_and_trial_ids_from_reset_state_ids(self, reset_state_ids):

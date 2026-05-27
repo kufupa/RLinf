@@ -32,28 +32,29 @@ launch_worker() {
   local seed="$2"
   local run_dir="${OUTPUT_DIR}/seed_${seed}"
   mkdir -p "${run_dir}"
-  srun --exclusive --gres=gpu:1 --ntasks=1 --cpus-per-task="${THREADS_PER_WORKER}" --export=ALL bash -lc "
-    cd \"${RLINF_ROOT}\"
-    export OMP_NUM_THREADS=\"${THREADS_PER_WORKER}\"
-    export MKL_NUM_THREADS=\"${THREADS_PER_WORKER}\"
-    export OPENBLAS_NUM_THREADS=\"${THREADS_PER_WORKER}\"
-    echo \"SMOLVLA_EGGROLL_PRODUCTION_WORKER slot=${slot} seed=${seed} CUDA_VISIBLE_DEVICES=\${CUDA_VISIBLE_DEVICES:-unset}\"
-    \"${PYTHON_BIN}\" scripts/run_smolvla_metaworld_eggroll.py \
-      --run-name \"smolvla_eggroll_prod_${RUN_ID}_seed_${seed}\" \
-      --output-dir \"${run_dir}\" \
-      --target-name \"${TARGET_NAME}\" \
-      --population-size \"${POPULATION_SIZE}\" \
+  (
+    cd "${RLINF_ROOT}"
+    export CUDA_VISIBLE_DEVICES="${slot}"
+    export OMP_NUM_THREADS="${THREADS_PER_WORKER}"
+    export MKL_NUM_THREADS="${THREADS_PER_WORKER}"
+    export OPENBLAS_NUM_THREADS="${THREADS_PER_WORKER}"
+    echo "SMOLVLA_EGGROLL_PRODUCTION_WORKER slot=${slot} seed=${seed} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+    "${PYTHON_BIN}" scripts/run_smolvla_metaworld_eggroll.py \
+      --run-name "smolvla_eggroll_prod_${RUN_ID}_seed_${seed}" \
+      --output-dir "${run_dir}" \
+      --target-name "${TARGET_NAME}" \
+      --population-size "${POPULATION_SIZE}" \
       --envs-per-member 1 \
       --episodes-per-member 1 \
-      --total-updates \"${TOTAL_UPDATES}\" \
-      --steps-per-update \"${STEPS_PER_UPDATE}\" \
-      --chunk-len \"${CHUNK_LEN}\" \
+      --total-updates "${TOTAL_UPDATES}" \
+      --steps-per-update "${STEPS_PER_UPDATE}" \
+      --chunk-len "${CHUNK_LEN}" \
       --max-episode-steps 120 \
       --rank 1 \
       --sigma 1e-4 \
       --learning-rate 1e-3 \
-      --seed \"${seed}\"
-  " >"${run_dir}/worker_stdout.log" 2>&1 &
+      --seed "${seed}"
+  ) >"${run_dir}/worker_stdout.log" 2>&1 &
 }
 
 launch_worker 0 5000

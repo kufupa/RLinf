@@ -202,14 +202,34 @@
       "max_episode_steps": 120,
       "population_size": 64,
       "total_updates": 50,
-      "status": "running_at_documentation_update",
+      "status": "completed_successfully",
       "early_update_seconds_per_member_episode": [
         2.11945665625,
         2.17463125
       ],
       "early_peak_vram_gb": 2.852,
-      "result": "started_after_throughput_gate",
-      "summary_path": "logs/results/smolvla_eggroll_production_244837/production_summary.json"
+      "result": "completed_after_throughput_gate",
+      "summary_path": "logs/results/smolvla_eggroll_production_244837/production_summary.json",
+      "completed_updates_per_seed": [
+        50,
+        50
+      ],
+      "last_update_seconds_per_member_episode": [
+        1.2463887002959382,
+        1.3357694367296062
+      ],
+      "recent_final_window_seconds_per_member_episode": [
+        1.2570285222493112,
+        1.319332306899014
+      ],
+      "best_score_sum": [
+        18.0,
+        20.0
+      ],
+      "final_target_weights": [
+        "logs/results/smolvla_eggroll_production_244837/seed_5000/target_weight_final.npy",
+        "logs/results/smolvla_eggroll_production_244837/seed_6000/target_weight_final.npy"
+      ]
     }
   ],
   "artifact_collection": {

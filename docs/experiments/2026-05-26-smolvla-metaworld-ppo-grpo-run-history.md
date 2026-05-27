@@ -104,9 +104,12 @@ into `logs/artifacts/smolvla_bottleneck_<UTC>/`.
 - `smolvla_eggroll_production_244837`
   - Job: `244837`
   - Script: `scripts/slurm/smolvla_metaworld_eggroll_production_a30x2.slurm`
-  - Status: running at time of documentation update
+  - Status: completed successfully
   - Config: two pinned one-GPU production seeds, population `64`, `50` updates, `push-v3`, `max_episode_steps=120`
-  - Early metrics: both seeds completed update `1`; observed about `135-139s/update`, about `2.1s/member-episode`, peak PyTorch VRAM about `2.85GB`.
+  - Final metrics: both seeds completed `50/50` updates and saved `target_weight_final.npy`.
+  - Last-update throughput: seed `5000` `1.246s/member-episode`, seed `6000` `1.336s/member-episode`.
+  - Recent final-window throughput: about `1.26s/member-episode` and `1.32s/member-episode`; peak PyTorch VRAM about `2.85GB`.
+  - Best observed per-update success sums: `18/64` and `20/64`.
   - RCA notes: production attempt `244832` with population `96` OOMed under two concurrent workers; attempt `244834` using nested `srun` isolated GPUs but serialized one worker. Production was relaunched with population `64`, which was proven concurrent-safe in the sweep.
 
 ## Raw Artifact Collection

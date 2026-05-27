@@ -21,6 +21,7 @@ class WorkerConfig:
     target_name: str
     output_dir: Path
     run_name: str
+    gpu_slot: str = "0"
     episodes_per_member: int = 1
     rank: int = 1
     sigma: float = 1e-4
@@ -51,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--envs-per-member", type=int, default=1)
     parser.add_argument("--episodes-per-member", type=int, default=1)
     parser.add_argument("--max-runtime-s", type=float, default=6 * 3600)
-    parser.add_argument("--cpus-per-worker", type=int, default=14)
+    parser.add_argument("--cpus-per-worker", type=int, default=6)
     return parser.parse_args()
 
 
@@ -63,12 +64,12 @@ def classify_failure(text: str) -> str:
         return "equivalence"
     if "no usable eggroll target" in lower or "target_selected" in lower and "missing" in lower:
         return "target_probe"
-    if "mujoco" in lower or "metaworld" in lower or "env crashed" in lower:
-        return "env"
     if "modulenotfounderror" in lower or "importerror" in lower:
         return "import_env"
     if "slurm" in lower or "srun:" in lower:
         return "slurm"
+    if "mujoco" in lower or "metaworld" in lower or "env crashed" in lower:
+        return "env"
     return "unknown"
 
 
@@ -98,12 +99,7 @@ def next_population_candidates(
 
 def build_worker_command(config: WorkerConfig, *, cpus_per_worker: int) -> list[str]:
     python_bin = os.environ.get("PYTHON_BIN", "python")
-    command = [
-        "srun",
-        "--exclusive",
-        "--gres=gpu:1",
-        f"--cpus-per-task={cpus_per_worker}",
-        "--ntasks=1",
+    return [
         python_bin,
         "scripts/run_smolvla_metaworld_eggroll.py",
         "--run-name",
@@ -135,9 +131,29 @@ def build_worker_command(config: WorkerConfig, *, cpus_per_worker: int) -> list[
         "--seed",
         str(config.seed),
     ]
+
+
+def add_verify_flag(command: list[str], config: WorkerConfig) -> list[str]:
     if config.verify_batched_equivalence:
-        command.append("--verify-batched-equivalence")
+        return [*command, "--verify-batched-equivalence"]
     return command
+
+
+def worker_environment(config: WorkerConfig, *, cpus_per_worker: int) -> dict[str, str]:
+    env = os.environ.copy()
+    root = env.get("RLINF_ROOT", str(Path(__file__).resolve().parents[1]))
+    project_src = env.get("PROJECT_SRC")
+    pythonpath_parts = [root]
+    if project_src:
+        pythonpath_parts.append(project_src)
+    if env.get("PYTHONPATH"):
+        pythonpath_parts.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = ":".join(pythonpath_parts)
+    env["CUDA_VISIBLE_DEVICES"] = config.gpu_slot
+    env["OMP_NUM_THREADS"] = str(max(1, cpus_per_worker))
+    env["MKL_NUM_THREADS"] = str(max(1, cpus_per_worker))
+    env["OPENBLAS_NUM_THREADS"] = str(max(1, cpus_per_worker))
+    return env
 
 
 def parse_worker_metrics(run_dir: Path) -> WorkerResult:
@@ -180,10 +196,18 @@ def append_handoff(path: Path, line: str) -> None:
 
 def run_worker(config: WorkerConfig, *, cpus_per_worker: int) -> WorkerResult:
     config.output_dir.mkdir(parents=True, exist_ok=True)
-    command = build_worker_command(config, cpus_per_worker=cpus_per_worker)
+    command = add_verify_flag(build_worker_command(config, cpus_per_worker=cpus_per_worker), config)
     stdout_path = config.output_dir / "worker_stdout.log"
     with stdout_path.open("w", encoding="utf-8") as stdout:
-        process = subprocess.run(command, stdout=stdout, stderr=subprocess.STDOUT, text=True, check=False)
+        process = subprocess.run(
+            command,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            cwd=os.environ.get("RLINF_ROOT"),
+            env=worker_environment(config, cpus_per_worker=cpus_per_worker),
+        )
     if process.returncode != 0:
         text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
         return WorkerResult(
@@ -202,10 +226,17 @@ def run_worker_wave(configs: list[WorkerConfig], *, cpus_per_worker: int) -> lis
     launched = []
     for config in configs:
         config.output_dir.mkdir(parents=True, exist_ok=True)
-        command = build_worker_command(config, cpus_per_worker=cpus_per_worker)
+        command = add_verify_flag(build_worker_command(config, cpus_per_worker=cpus_per_worker), config)
         stdout_path = config.output_dir / "worker_stdout.log"
         stdout = stdout_path.open("w", encoding="utf-8")
-        process = subprocess.Popen(command, stdout=stdout, stderr=subprocess.STDOUT, text=True)
+        process = subprocess.Popen(
+            command,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=os.environ.get("RLINF_ROOT"),
+            env=worker_environment(config, cpus_per_worker=cpus_per_worker),
+        )
         launched.append((config, process, stdout, stdout_path))
 
     results: list[WorkerResult] = []
@@ -240,6 +271,9 @@ def main() -> int:
     history: list[WorkerResult] = []
     pending = [4, 16, 32, 48, 64, 80, 96]
     pending = [pop for pop in pending if pop <= args.max_population_soft]
+    gpu_slots = [slot.strip() for slot in args.gpu_slots.split(",") if slot.strip()]
+    if not gpu_slots:
+        gpu_slots = ["0"]
     append_handoff(handoff, f"# SmolVLA EGGROLL Campaign\n\nTarget: `{args.target_name}`\n")
 
     while pending and time.time() - started < args.max_runtime_s:
@@ -256,6 +290,7 @@ def main() -> int:
                 target_name=args.target_name,
                 output_dir=out_dir / f"pop_{pop:04d}",
                 run_name=f"smolvla_eggroll_pop_{pop:04d}",
+                gpu_slot=gpu_slots[index % len(gpu_slots)],
                 seed=1000 + pop,
                 verify_batched_equivalence=(not history and index == 0),
             )

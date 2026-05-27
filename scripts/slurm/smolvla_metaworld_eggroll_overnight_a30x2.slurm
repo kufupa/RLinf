@@ -31,4 +31,4 @@ nvidia-smi || true
   --envs-per-member 1 \
   --episodes-per-member 1 \
   --max-runtime-s 21600 \
-  --cpus-per-worker 14
+  --cpus-per-worker 6

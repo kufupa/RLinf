@@ -25,6 +25,7 @@ def test_classify_failure_detects_common_root_causes() -> None:
     assert module.classify_failure("No usable EGGROLL target survived probe") == "target_probe"
     assert module.classify_failure("mujoco.FatalError env crashed") == "env"
     assert module.classify_failure("ModuleNotFoundError: No module named ray") == "import_env"
+    assert module.classify_failure("run_smolvla_metaworld_eggroll.py ModuleNotFoundError") == "import_env"
 
 
 def test_brave_population_plan_jumps_when_memory_headroom_is_large() -> None:
@@ -47,7 +48,7 @@ def test_brave_population_plan_jumps_when_memory_headroom_is_large() -> None:
     assert 96 in candidates
 
 
-def test_build_worker_command_uses_srun_not_nested_sbatch(tmp_path: Path) -> None:
+def test_build_worker_command_uses_one_allocation_not_nested_sbatch(tmp_path: Path) -> None:
     module = _load_campaign()
     config = module.WorkerConfig(
         population_size=16,
@@ -59,14 +60,36 @@ def test_build_worker_command_uses_srun_not_nested_sbatch(tmp_path: Path) -> Non
         run_name="worker_pop16",
     )
 
-    command = module.build_worker_command(config, cpus_per_worker=14)
+    command = module.build_worker_command(config, cpus_per_worker=6)
 
-    assert command[:5] == ["srun", "--exclusive", "--gres=gpu:1", "--cpus-per-task=14", "--ntasks=1"]
+    assert "scripts/run_smolvla_metaworld_eggroll.py" in command
     assert "sbatch" not in command
+    assert "srun" not in command
     assert "--population-size" in command
     assert "16" in command
     assert "--target-name" in command
     assert config.target_name in command
+
+
+def test_worker_environment_pins_gpu_and_repo_path(tmp_path: Path, monkeypatch) -> None:
+    module = _load_campaign()
+    monkeypatch.setenv("RLINF_ROOT", "/repo")
+    config = module.WorkerConfig(
+        population_size=4,
+        envs_per_member=1,
+        steps_per_update=120,
+        chunk_len=5,
+        target_name="target",
+        output_dir=tmp_path / "worker",
+        run_name="worker_pop4",
+        gpu_slot="1",
+    )
+
+    env = module.worker_environment(config, cpus_per_worker=6)
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "1"
+    assert env["PYTHONPATH"].split(":")[0] == "/repo"
+    assert env["OMP_NUM_THREADS"] == "6"
 
 
 def test_parse_worker_metrics_reads_required_markers(tmp_path: Path) -> None:

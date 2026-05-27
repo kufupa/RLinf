@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import numpy as np
+
+from rlinf.algorithms.eggroll.population import EggrollMember
+
+
+def resolve_rollout_sizes(
+    *,
+    population_size: int | None,
+    num_envs: int,
+    envs_per_member: int,
+) -> tuple[int, int]:
+    if envs_per_member < 1:
+        raise ValueError("envs_per_member must be >= 1")
+    resolved_population = num_envs if population_size is None else population_size
+    if resolved_population < 1:
+        raise ValueError("population_size must be >= 1")
+    return resolved_population, resolved_population * envs_per_member
+
+
+def env_member_positions(*, population_size: int, envs_per_member: int) -> np.ndarray:
+    if population_size < 1:
+        raise ValueError("population_size must be >= 1")
+    if envs_per_member < 1:
+        raise ValueError("envs_per_member must be >= 1")
+    return np.repeat(np.arange(population_size, dtype=np.int64), envs_per_member)
+
+
+def aggregate_member_scores(
+    members: list[EggrollMember],
+    env_totals: np.ndarray,
+    env_to_member: np.ndarray,
+) -> list[EggrollMember]:
+    env_totals = np.asarray(env_totals, dtype=np.float32).reshape(-1)
+    env_to_member = np.asarray(env_to_member, dtype=np.int64).reshape(-1)
+    if env_totals.shape != env_to_member.shape:
+        raise ValueError(
+            f"env totals shape {env_totals.shape} does not match member map {env_to_member.shape}"
+        )
+    if members and (env_to_member.min(initial=0) < 0 or env_to_member.max(initial=0) >= len(members)):
+        raise ValueError("env_to_member contains an out-of-range member position")
+
+    scored: list[EggrollMember] = []
+    for position, member in enumerate(members):
+        mask = env_to_member == position
+        if not np.any(mask):
+            raise ValueError(f"member position {position} has no environment replicas")
+        scored.append(
+            EggrollMember(
+                index=member.index,
+                seed=member.seed,
+                delta=member.delta,
+                score=float(env_totals[mask].mean()),
+            )
+        )
+    return scored
+
+
+def expand_members_for_envs(
+    members: list[EggrollMember], env_to_member: np.ndarray
+) -> list[EggrollMember]:
+    env_to_member = np.asarray(env_to_member, dtype=np.int64).reshape(-1)
+    if env_to_member.size == 0:
+        raise ValueError("env_to_member must not be empty")
+    if env_to_member.min() < 0 or env_to_member.max() >= len(members):
+        raise ValueError("env_to_member contains an out-of-range member position")
+    return [members[int(position)] for position in env_to_member]
+
+
+def iter_chunk_lengths(*, total_steps: int, chunk_horizon: int) -> Iterator[int]:
+    if total_steps < 1:
+        raise ValueError("total_steps must be >= 1")
+    if chunk_horizon < 1:
+        raise ValueError("chunk_horizon must be >= 1")
+    remaining = total_steps
+    while remaining > 0:
+        chunk = min(chunk_horizon, remaining)
+        yield chunk
+        remaining -= chunk

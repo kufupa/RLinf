@@ -55,6 +55,14 @@ def test_parse_population_list_uses_explicit_order() -> None:
     assert module.parse_population_list("") == []
 
 
+def test_worker_wave_size_tracks_available_gpu_slots() -> None:
+    module = _load_campaign()
+
+    assert module.worker_wave_size(["0"]) == 1
+    assert module.worker_wave_size(["0", "1"]) == 2
+    assert module.worker_wave_size(["0", "1", "2"]) == 3
+
+
 def test_build_worker_command_uses_one_allocation_not_nested_sbatch(tmp_path: Path) -> None:
     module = _load_campaign()
     config = module.WorkerConfig(

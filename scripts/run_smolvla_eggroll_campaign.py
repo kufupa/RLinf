@@ -105,6 +105,10 @@ def parse_population_list(value: str) -> list[int]:
     return [int(part.strip()) for part in value.split(",") if part.strip()]
 
 
+def worker_wave_size(gpu_slots: list[str]) -> int:
+    return max(1, len(gpu_slots))
+
+
 def build_worker_command(config: WorkerConfig, *, cpus_per_worker: int) -> list[str]:
     python_bin = os.environ.get("PYTHON_BIN", "python")
     return [
@@ -293,8 +297,9 @@ def main() -> int:
     append_handoff(handoff, f"# SmolVLA EGGROLL Campaign\n\nTarget: `{args.target_name}`\n")
 
     while pending and time.time() - started < args.max_runtime_s:
-        wave = pending[:2]
-        pending = pending[2:]
+        wave_size = worker_wave_size(gpu_slots)
+        wave = pending[:wave_size]
+        pending = pending[wave_size:]
         append_handoff(handoff, f"## Wave populations {wave}")
         configs = [
             WorkerConfig(

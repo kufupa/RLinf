@@ -32,7 +32,9 @@ export OMP_NUM_THREADS="${THREADS_PER_WORKER}"
 export MKL_NUM_THREADS="${THREADS_PER_WORKER}"
 export OPENBLAS_NUM_THREADS="${THREADS_PER_WORKER}"
 
-echo "SMOLVLA_EGGROLL_GENERALIZATION_ENV job=${RUN_ID} seed=${WORKER_SEED} target=${TARGET_NAME} pop=${POPULATION_SIZE} eval_seeds=${EVAL_SEEDS_PER_MEMBER} updates=${TOTAL_UPDATES} reset_seed_mode=per_update train_seeds=${2000}-$((2000 + TOTAL_UPDATES * EVAL_SEEDS_PER_MEMBER - 1))"
+RESET_SEED_BASE=2000
+TRAIN_SEED_END=$((RESET_SEED_BASE + TOTAL_UPDATES * EVAL_SEEDS_PER_MEMBER - 1))
+echo "SMOLVLA_EGGROLL_GENERALIZATION_ENV job=${RUN_ID} seed=${WORKER_SEED} target=${TARGET_NAME} pop=${POPULATION_SIZE} eval_seeds=${EVAL_SEEDS_PER_MEMBER} updates=${TOTAL_UPDATES} reset_seed_mode=per_update train_seeds=${RESET_SEED_BASE}-${TRAIN_SEED_END}"
 nvidia-smi -L || true
 nvidia-smi || true
 
@@ -50,7 +52,7 @@ nvidia-smi || true
   --rank 1 \
   --sigma 1e-4 \
   --learning-rate 1e-3 \
-  --reset-seed-base 2000 \
+  --reset-seed-base "${RESET_SEED_BASE}" \
   --seed "${WORKER_SEED}"
 
 echo "SMOLVLA_EGGROLL_GENERALIZATION_JOB_OK ${OUTPUT_DIR}"

@@ -48,6 +48,13 @@ def test_brave_population_plan_jumps_when_memory_headroom_is_large() -> None:
     assert 96 in candidates
 
 
+def test_parse_population_list_uses_explicit_order() -> None:
+    module = _load_campaign()
+
+    assert module.parse_population_list("128,160,192,256") == [128, 160, 192, 256]
+    assert module.parse_population_list("") == []
+
+
 def test_build_worker_command_uses_one_allocation_not_nested_sbatch(tmp_path: Path) -> None:
     module = _load_campaign()
     config = module.WorkerConfig(
@@ -104,6 +111,11 @@ def test_parse_worker_metrics_reads_required_markers(tmp_path: Path) -> None:
                 "envs_per_member": 1,
                 "seconds_per_member_episode": 1.2,
                 "hardware": {"max_memory_allocated": 8 * 1024**3},
+                "resources": {
+                    "gpu_memory_used_mb_max": 6144.0,
+                    "gpu_util_percent_mean": 23.5,
+                    "rss_mb_max": 8192.0,
+                },
             }
         )
         + "\n"
@@ -118,3 +130,6 @@ def test_parse_worker_metrics_reads_required_markers(tmp_path: Path) -> None:
     assert result.population_size == 16
     assert result.seconds_per_member_episode == 1.2
     assert result.peak_vram_gb == 8.0
+    assert result.peak_gpu_memory_used_gb == 6.0
+    assert result.gpu_util_percent_mean == 23.5
+    assert result.rss_gb_max == 8.0

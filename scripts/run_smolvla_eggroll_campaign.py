@@ -39,6 +39,9 @@ class WorkerResult:
     seconds_per_member_episode: float | None
     peak_vram_gb: float | None
     failure_kind: str | None
+    peak_gpu_memory_used_gb: float | None = None
+    gpu_util_percent_mean: float | None = None
+    rss_gb_max: float | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-len", type=int, default=5)
     parser.add_argument("--envs-per-member", type=int, default=1)
     parser.add_argument("--episodes-per-member", type=int, default=1)
+    parser.add_argument("--population-list", default="")
     parser.add_argument("--max-runtime-s", type=float, default=6 * 3600)
     parser.add_argument("--cpus-per-worker", type=int, default=6)
     return parser.parse_args()
@@ -95,6 +99,10 @@ def next_population_candidates(
     else:
         candidates = [best.population_size + 8, best.population_size + 16]
     return sorted({pop for pop in candidates if pop > 0 and pop <= max_population_soft and pop not in tried})
+
+
+def parse_population_list(value: str) -> list[int]:
+    return [int(part.strip()) for part in value.split(",") if part.strip()]
 
 
 def build_worker_command(config: WorkerConfig, *, cpus_per_worker: int) -> list[str]:
@@ -173,6 +181,7 @@ def parse_worker_metrics(run_dir: Path) -> WorkerResult:
     if update is None or not run_ok:
         return WorkerResult(0, 0, str(run_dir), False, None, None, "missing_success_marker")
     hardware = update.get("hardware", {})
+    resources = update.get("resources", {})
     peak_bytes = max(
         int(hardware.get("max_memory_allocated", 0) or 0),
         int(hardware.get("max_memory_reserved", 0) or 0),
@@ -185,6 +194,12 @@ def parse_worker_metrics(run_dir: Path) -> WorkerResult:
         seconds_per_member_episode=float(update["seconds_per_member_episode"]),
         peak_vram_gb=round(peak_bytes / 1024**3, 3) if peak_bytes else None,
         failure_kind=None,
+        peak_gpu_memory_used_gb=round(
+            float(resources.get("gpu_memory_used_mb_max", 0.0) or 0.0) / 1024.0,
+            3,
+        ),
+        gpu_util_percent_mean=float(resources.get("gpu_util_percent_mean", 0.0) or 0.0),
+        rss_gb_max=round(float(resources.get("rss_mb_max", 0.0) or 0.0) / 1024.0, 3),
     )
 
 
@@ -269,7 +284,8 @@ def main() -> int:
     handoff = out_dir / "overnight_handoff.md"
     summary_path = out_dir / "campaign_summary.json"
     history: list[WorkerResult] = []
-    pending = [4, 16, 32, 48, 64, 80, 96]
+    explicit_populations = parse_population_list(args.population_list)
+    pending = explicit_populations or [4, 16, 32, 48, 64, 80, 96]
     pending = [pop for pop in pending if pop <= args.max_population_soft]
     gpu_slots = [slot.strip() for slot in args.gpu_slots.split(",") if slot.strip()]
     if not gpu_slots:

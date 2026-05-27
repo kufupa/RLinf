@@ -21,6 +21,7 @@ TOTAL_UPDATES="${SMOLVLA_EGGROLL_PROD_UPDATES:-10}"
 EVAL_SEEDS_PER_MEMBER="${SMOLVLA_EGGROLL_EVAL_SEEDS_PER_MEMBER:-4}"
 THREADS_PER_WORKER="${SMOLVLA_EGGROLL_THREADS_PER_WORKER:-6}"
 export OUTPUT_DIR
+export RLINF_ROOT PYTHON_BIN TARGET_NAME POPULATION_SIZE TOTAL_UPDATES EVAL_SEEDS_PER_MEMBER THREADS_PER_WORKER
 mkdir -p "${OUTPUT_DIR}"
 
 echo "SMOLVLA_EGGROLL_FAIR_ENV job=${RUN_ID} target=${TARGET_NAME} population=${POPULATION_SIZE} eval_seeds=${EVAL_SEEDS_PER_MEMBER} updates=${TOTAL_UPDATES} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset} SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-unset}"
@@ -41,7 +42,7 @@ launch_worker() {
     export OMP_NUM_THREADS="${THREADS_PER_WORKER}"
     export MKL_NUM_THREADS="${THREADS_PER_WORKER}"
     export OPENBLAS_NUM_THREADS="${THREADS_PER_WORKER}"
-    srun --exclusive --exact --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task="${THREADS_PER_WORKER}" \
+    srun --export=ALL --exclusive --exact --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task="${THREADS_PER_WORKER}" \
       /bin/bash -lc '
         set -euo pipefail
         cd "${RLINF_ROOT}"

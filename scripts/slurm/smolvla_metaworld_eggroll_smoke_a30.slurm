@@ -67,8 +67,8 @@ echo "SMOLVLA_EGGROLL_SMOKE_TARGET ${TARGET_NAME}"
   --task-name push-v3 \
   --task-description "Push the puck to a goal" \
   --target-name "${TARGET_NAME}" \
-  --population-size 2 \
-  --envs-per-member 1 \
+  --population-size 4 \
+  --envs-per-member 2 \
   --episodes-per-member 1 \
   --total-updates 1 \
   --steps-per-update 20 \
@@ -77,6 +77,7 @@ echo "SMOLVLA_EGGROLL_SMOKE_TARGET ${TARGET_NAME}"
   --rank 1 \
   --sigma 1e-4 \
   --learning-rate 1e-3 \
+  --reset-seed-base 2000 \
   --seed 11 \
   --verify-batched-equivalence
 

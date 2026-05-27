@@ -17,6 +17,8 @@ from rlinf.algorithms.eggroll.batched_low_rank import batched_low_rank_module_pa
 from rlinf.algorithms.eggroll.parallel_rollout import aggregate_member_scores
 from rlinf.algorithms.eggroll.parallel_rollout import common_seed_rollout_layout
 from rlinf.algorithms.eggroll.parallel_rollout import iter_chunk_lengths
+from rlinf.algorithms.eggroll.parallel_rollout import reset_seed_stride
+from rlinf.algorithms.eggroll.parallel_rollout import update_reset_seed_base
 from rlinf.algorithms.eggroll.population import EggrollMember
 from rlinf.algorithms.eggroll.population import EggrollPopulationConfig
 from rlinf.algorithms.eggroll.population import aggregate_weighted_delta
@@ -70,6 +72,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--reset-seed-base", type=int, default=2000)
+    parser.add_argument(
+        "--reset-seed-mode",
+        choices=("per_update", "fixed"),
+        default="per_update",
+        help="per_update rotates eval seeds each ES update; fixed keeps reset-seed-base (legacy).",
+    )
+    parser.add_argument(
+        "--reset-seed-stride",
+        type=int,
+        default=0,
+        help="Env seeds consumed per update (0 = envs_per_member * episodes_per_member).",
+    )
     parser.add_argument("--reward-mode", default="sparse_success_delta")
     parser.add_argument("--use-rel-reward", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--verify-batched-equivalence", action="store_true")
@@ -301,6 +315,10 @@ def evaluate_eggroll_update(
             "mode": "common_random_numbers_seed_major",
             "eval_seeds_per_member": config.envs_per_member,
             "reset_seed_base": config.reset_seed_base,
+            "reset_seed_range": [
+                int(np.min(layout.reset_seeds)),
+                int(np.max(layout.reset_seeds)),
+            ],
             "member_positions_head": layout.member_positions[
                 : min(16, layout.member_positions.size)
             ].tolist(),
@@ -375,8 +393,21 @@ def main() -> int:
             if not payload["ok"]:
                 return 3
 
+        stride_override = int(args.reset_seed_stride) if int(args.reset_seed_stride) > 0 else None
         for update in range(1, args.total_updates + 1):
-            update_config = replace(run_config, seed=run_config.seed + update - 1)
+            effective_reset_seed_base = update_reset_seed_base(
+                run_config.reset_seed_base,
+                update,
+                envs_per_member=run_config.envs_per_member,
+                episodes_per_member=run_config.episodes_per_member,
+                reset_seed_mode=args.reset_seed_mode,
+                reset_seed_stride_override=stride_override,
+            )
+            update_config = replace(
+                run_config,
+                seed=run_config.seed + update - 1,
+                reset_seed_base=effective_reset_seed_base,
+            )
             result = evaluate_eggroll_update(
                 model=model,
                 env=env,
@@ -392,6 +423,12 @@ def main() -> int:
                 {
                     "run_name": args.run_name,
                     "update": update,
+                    "reset_seed_mode": args.reset_seed_mode,
+                    "reset_seed_stride": reset_seed_stride(
+                        envs_per_member=run_config.envs_per_member,
+                        episodes_per_member=run_config.episodes_per_member,
+                        reset_seed_stride_override=stride_override,
+                    ),
                     **result.metrics,
                     "member_scores": [
                         {"index": member.index, "seed": member.seed, "score": member.score}

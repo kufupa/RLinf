@@ -147,6 +147,36 @@ def test_common_seed_rollout_layout_repeats_each_seed_for_all_members() -> None:
     assert layout.reset_seeds.tolist() == [2000, 2000, 2000, 2001, 2001, 2001]
 
 
+def test_update_reset_seed_base_advances_each_update() -> None:
+    from rlinf.algorithms.eggroll.parallel_rollout import update_reset_seed_base
+
+    assert (
+        update_reset_seed_base(
+            2000,
+            3,
+            envs_per_member=4,
+            episodes_per_member=1,
+            reset_seed_mode="per_update",
+        )
+        == 2008
+    )
+
+
+def test_update_reset_seed_base_fixed_mode() -> None:
+    from rlinf.algorithms.eggroll.parallel_rollout import update_reset_seed_base
+
+    assert (
+        update_reset_seed_base(
+            2000,
+            5,
+            envs_per_member=4,
+            episodes_per_member=1,
+            reset_seed_mode="fixed",
+        )
+        == 2000
+    )
+
+
 def test_aggregate_member_scores_averages_replicas_per_member() -> None:
     members = [_member(10), _member(11), _member(12)]
     positions = np.array([0, 0, 1, 1, 2, 2], dtype=np.int64)

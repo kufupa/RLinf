@@ -59,6 +59,47 @@ def common_seed_rollout_layout(
     return CommonSeedRolloutLayout(member_positions=member_positions, reset_seeds=reset_seeds)
 
 
+def reset_seed_stride(
+    *,
+    envs_per_member: int,
+    episodes_per_member: int,
+    reset_seed_stride_override: int | None = None,
+) -> int:
+    if envs_per_member < 1:
+        raise ValueError("envs_per_member must be >= 1")
+    if episodes_per_member < 1:
+        raise ValueError("episodes_per_member must be >= 1")
+    if reset_seed_stride_override is not None:
+        if reset_seed_stride_override < 1:
+            raise ValueError("reset_seed_stride_override must be >= 1")
+        return int(reset_seed_stride_override)
+    return int(envs_per_member) * int(episodes_per_member)
+
+
+def update_reset_seed_base(
+    reset_seed_base: int,
+    update_index: int,
+    *,
+    envs_per_member: int,
+    episodes_per_member: int,
+    reset_seed_mode: str = "per_update",
+    reset_seed_stride_override: int | None = None,
+) -> int:
+    if update_index < 1:
+        raise ValueError("update_index must be >= 1")
+    mode = str(reset_seed_mode)
+    if mode == "fixed":
+        return int(reset_seed_base)
+    if mode != "per_update":
+        raise ValueError(f"reset_seed_mode must be 'per_update' or 'fixed', got {reset_seed_mode!r}")
+    stride = reset_seed_stride(
+        envs_per_member=envs_per_member,
+        episodes_per_member=episodes_per_member,
+        reset_seed_stride_override=reset_seed_stride_override,
+    )
+    return int(reset_seed_base) + (int(update_index) - 1) * stride
+
+
 def aggregate_member_scores(
     members: list[EggrollMember],
     env_totals: np.ndarray,

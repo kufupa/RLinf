@@ -3,13 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import time
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from rlinf.algorithms.eggroll.low_rank import temporary_low_rank_perturbation
+import numpy as np
+
+from rlinf.algorithms.eggroll.batched_low_rank import batched_low_rank_module_patch
 from rlinf.algorithms.eggroll.targets import TargetProbeResult
 from rlinf.algorithms.eggroll.targets import action_effect_summary
 from rlinf.algorithms.eggroll.targets import find_eggroll_targets
@@ -68,6 +71,18 @@ def cuda_payload(device: torch.device) -> dict[str, Any]:
     return payload
 
 
+def reset_policy_replay_state(model: Any, *, seed: int = 0) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    model._last_reset_seeds = None
+    policy_reset = getattr(getattr(model, "policy", None), "reset", None)
+    if callable(policy_reset):
+        policy_reset()
+
+
 def main() -> int:
     args = parse_args()
     out_dir = Path(args.output_dir)
@@ -96,6 +111,7 @@ def main() -> int:
         with timers.time("env_reset"):
             obs, _ = env.reset()
         with timers.time("base_predict_action_batch"):
+            reset_policy_replay_state(model, seed=args.seed)
             base_actions, _ = model.predict_action_batch(obs, mode="eval", compute_values=False)
 
         policy_model = getattr(model.policy, "model", model.policy)
@@ -121,8 +137,14 @@ def main() -> int:
                 seed=args.seed + 1009 * (index + 1),
             )
             with record_module_io(target.module) as telemetry:
-                with temporary_low_rank_perturbation(target.module, delta):
+                with batched_low_rank_module_patch(
+                    target.module,
+                    deltas=[delta],
+                    member_positions=np.zeros(args.num_envs, dtype=np.int64),
+                    allow_flattened_batch=True,
+                ):
                     with timers.time("perturbed_predict_action_batch"):
+                        reset_policy_replay_state(model, seed=args.seed)
                         perturbed_actions, _ = model.predict_action_batch(
                             obs,
                             mode="eval",

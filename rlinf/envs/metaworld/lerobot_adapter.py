@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
@@ -12,6 +14,18 @@ import numpy as np
 
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+
+
+def _load_task_metadata(task: str) -> tuple[str, Any]:
+    config_path = Path(__file__).with_name("metaworld_config.json")
+    with config_path.open() as f:
+        config = json.load(f)
+    descriptions = config["TASK_DESCRIPTIONS"]
+    policy_names = config["TASK_POLICY_MAPPING"]
+
+    import metaworld.policies as policies
+
+    return descriptions[task], getattr(policies, policy_names[task])()
 
 
 class DeferredLeRobotMetaworldEnv(gym.Env):
@@ -31,7 +45,6 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         reset_randomization_mode: str | None = None,
     ) -> None:
         from gymnasium import spaces
-        from lerobot.envs import metaworld as lr_mw
 
         self.task = str(task).replace("metaworld-", "")
         self.obs_type = str(obs_type)
@@ -56,8 +69,7 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         self._env: Any | None = None
         self._last_raw_obs: np.ndarray | None = None
         self._max_episode_steps = 500
-        self.task_description = lr_mw.TASK_DESCRIPTIONS[self.task]
-        self.expert_policy = lr_mw.TASK_POLICY_MAPPING[self.task]()
+        self.task_description, self.expert_policy = _load_task_metadata(self.task)
 
         if self.obs_type == "pixels":
             self.observation_space = spaces.Dict(

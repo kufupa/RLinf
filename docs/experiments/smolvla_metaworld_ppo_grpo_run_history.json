@@ -21,12 +21,18 @@
       "total_updates": 25,
       "ppo_epochs": 2,
       "minibatch_envs": 4,
-      "lr": 1e-6,
-      "value_lr": 1e-4,
+      "lr": 1e-06,
+      "value_lr": 0.0001,
       "reward_mode": "sparse_success_delta",
       "relative_reward": true,
       "eval_num_envs": 25,
-      "eval_updates": [0, 1, 5, 10, 25],
+      "eval_updates": [
+        0,
+        1,
+        5,
+        10,
+        25
+      ],
       "checkpoint_for_resume": "update_000025.pt",
       "raw_log_expected": "logs/pbs/smolvla-direct-s2-sparse-2835191.pbs-7.driver.log"
     },
@@ -42,12 +48,18 @@
       "total_updates": 25,
       "ppo_epochs": 2,
       "minibatch_envs": 4,
-      "lr": 1e-6,
-      "value_lr": 1e-4,
+      "lr": 1e-06,
+      "value_lr": 0.0001,
       "reward_mode": "dense_return",
       "relative_reward": false,
       "eval_num_envs": 25,
-      "eval_updates": [0, 1, 5, 10, 25],
+      "eval_updates": [
+        0,
+        1,
+        5,
+        10,
+        25
+      ],
       "raw_log_expected": "logs/pbs/smolvla-direct-s2-dense-2835192.pbs-7.driver.log"
     },
     {
@@ -75,8 +87,8 @@
       "total_updates": 50,
       "ppo_epochs": 2,
       "minibatch_envs": 4,
-      "lr": 3e-7,
-      "value_lr": 1e-4,
+      "lr": 3e-07,
+      "value_lr": 0.0001,
       "reward_mode": "sparse_success_delta",
       "relative_reward": true,
       "eval_num_envs": 25,
@@ -125,9 +137,79 @@
       "pbs_script": "scripts/pbs/smolvla_metaworld_component_benchmark.pbs",
       "runner": "scripts/benchmark_smolvla_metaworld_components.py",
       "gpu_request": "1x L40S on v1_gpu72",
-      "modes": ["policy", "env", "rollout", "ppo"],
-      "batch_sizes": [1, 4, 8, 16, 32],
+      "modes": [
+        "policy",
+        "env",
+        "rollout",
+        "ppo"
+      ],
+      "batch_sizes": [
+        1,
+        4,
+        8,
+        16,
+        32
+      ],
       "purpose": "Measure policy inference, env stepping, rollout, and PPO update bottlenecks."
+    },
+    {
+      "name": "smolvla_eggroll_smoke_244823",
+      "job_id": "244823",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_smoke_a30.slurm",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "1x A30 on a30",
+      "task": "push-v3",
+      "max_episode_steps": 120,
+      "target_name": "vlm_with_expert.lm_expert.layers.1.self_attn.v_proj",
+      "purpose": "End-to-end EGGROLL smoke: unit tests, target probe, batched equivalence, one tiny update.",
+      "result": "passed"
+    },
+    {
+      "name": "smolvla_eggroll_campaign_244828",
+      "job_id": "244828",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_overnight_a30x2.slurm",
+      "controller": "scripts/run_smolvla_eggroll_campaign.py",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "2x A30 on a30, 32 CPU cap, 128G RAM",
+      "task": "push-v3",
+      "max_episode_steps": 120,
+      "chunk_len": 5,
+      "envs_per_member": 1,
+      "population_sweep": [
+        4,
+        16,
+        32,
+        48,
+        64,
+        80,
+        96
+      ],
+      "best_population_size": 96,
+      "best_seconds_per_member_episode": 1.9387124265776947,
+      "best_peak_vram_gb": 3.691,
+      "pi05_seconds_per_member_episode": 10.18,
+      "speedup_vs_pi05": 5.250907695459614,
+      "result": "beats_pi05",
+      "summary_path": "logs/results/smolvla_eggroll_campaign_244828/campaign_summary.json"
+    },
+    {
+      "name": "smolvla_eggroll_production_244837",
+      "job_id": "244837",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_production_a30x2.slurm",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "2x A30 on a30, 32 CPU cap, 128G RAM",
+      "task": "push-v3",
+      "max_episode_steps": 120,
+      "population_size": 64,
+      "total_updates": 50,
+      "status": "running_at_documentation_update",
+      "early_update_seconds_per_member_episode": [
+        2.11945665625,
+        2.17463125
+      ],
+      "early_peak_vram_gb": 2.852,
+      "result": "started_after_throughput_gate",
+      "summary_path": "logs/results/smolvla_eggroll_production_244837/production_summary.json"
     }
   ],
   "artifact_collection": {
@@ -138,7 +220,13 @@
       "DIRECT_SMOLVLA_PPO_RUN_OK",
       "SMOLVLA_EVAL_RESULT",
       "SMOLVLA_EVAL_SWEEP_OK",
-      "SMOLVLA_COMPONENT_BENCH"
+      "SMOLVLA_COMPONENT_BENCH",
+      "SMOLVLA_EGGROLL_TARGET_SELECTED",
+      "SMOLVLA_EGGROLL_EQUIV_OK",
+      "SMOLVLA_EGGROLL_UPDATE",
+      "SMOLVLA_EGGROLL_RUN_OK",
+      "SMOLVLA_EGGROLL_CAMPAIGN_OK",
+      "SMOLVLA_EGGROLL_PRODUCTION_OK"
     ]
   }
 }

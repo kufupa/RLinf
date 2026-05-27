@@ -80,6 +80,35 @@ into `logs/artifacts/smolvla_bottleneck_<UTC>/`.
   - Modes: policy-only, env-only, rollout-only, PPO-update-only
   - Policy batch sizes: `1,4,8,16,32`
 
+## EGGROLL Throughput Runs
+
+- `smolvla_eggroll_smoke_244823`
+  - Job: `244823`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_smoke_a30.slurm`
+  - Runner: `scripts/run_smolvla_metaworld_eggroll.py`
+  - GPU request: `1x A30`, partition `a30`
+  - Target: `vlm_with_expert.lm_expert.layers.1.self_attn.v_proj`
+  - Result: target probe, serial/batched equivalence, and one tiny EGGROLL update passed.
+
+- `smolvla_eggroll_campaign_244828`
+  - Job: `244828`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_overnight_a30x2.slurm`
+  - Controller: `scripts/run_smolvla_eggroll_campaign.py`
+  - GPU request: `2x A30`, `32` CPU cap, `128G` RAM
+  - Task: `push-v3`, `max_episode_steps=120`, `chunk_len=5`, `envs_per_member=1`
+  - Population sweep: `4,16,32,48,64,80,96`
+  - Best throughput: population `96`, `1.9387s/member-episode`, peak VRAM `3.691GB`
+  - Pi0.5 baseline: `10.18s/member-episode`; SmolVLA-EGGROLL best is about `5.25x` faster on the same amortized metric.
+  - RCA notes: first campaign attempt failed because nested worker commands lost `PYTHONPATH` and exceeded gpucluster3 nested `srun` CPU limits; fixed by controller-pinned subprocess workers with explicit repo environment.
+
+- `smolvla_eggroll_production_244837`
+  - Job: `244837`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_production_a30x2.slurm`
+  - Status: running at time of documentation update
+  - Config: two pinned one-GPU production seeds, population `64`, `50` updates, `push-v3`, `max_episode_steps=120`
+  - Early metrics: both seeds completed update `1`; observed about `135-139s/update`, about `2.1s/member-episode`, peak PyTorch VRAM about `2.85GB`.
+  - RCA notes: production attempt `244832` with population `96` OOMed under two concurrent workers; attempt `244834` using nested `srun` isolated GPUs but serialized one worker. Production was relaunched with population `64`, which was proven concurrent-safe in the sweep.
+
 ## Raw Artifact Collection
 
 Run:

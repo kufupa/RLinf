@@ -15,7 +15,7 @@ import torch
 
 from rlinf.algorithms.eggroll.batched_low_rank import batched_low_rank_module_patch
 from rlinf.algorithms.eggroll.parallel_rollout import aggregate_member_scores
-from rlinf.algorithms.eggroll.parallel_rollout import env_member_positions
+from rlinf.algorithms.eggroll.parallel_rollout import common_seed_rollout_layout
 from rlinf.algorithms.eggroll.parallel_rollout import iter_chunk_lengths
 from rlinf.algorithms.eggroll.population import EggrollMember
 from rlinf.algorithms.eggroll.population import EggrollPopulationConfig
@@ -39,6 +39,7 @@ class EggrollRunConfig:
     sigma: float
     learning_rate: float
     seed: int
+    reset_seed_base: int
 
 
 @dataclass(frozen=True)
@@ -195,19 +196,30 @@ def evaluate_eggroll_update(
         seed=config.seed,
     )
     members = sample_population(population_config)
-    env_to_member = env_member_positions(
+    layout = common_seed_rollout_layout(
         population_size=config.population_size,
-        envs_per_member=config.envs_per_member,
+        eval_seeds_per_member=config.envs_per_member,
+        reset_seed_base=config.reset_seed_base,
     )
+    env_to_member = layout.member_positions
     timers = TimingStats(device)
     started = time.perf_counter()
     env_totals = np.zeros(expected_envs, dtype=np.float32)
     scalar_env_steps = 0
     saturation_values: list[float] = []
 
-    for _episode in range(config.episodes_per_member):
+    for episode_index in range(config.episodes_per_member):
+        episode_layout = common_seed_rollout_layout(
+            population_size=config.population_size,
+            eval_seeds_per_member=config.envs_per_member,
+            reset_seed_base=config.reset_seed_base + episode_index * config.envs_per_member,
+        )
+        env_to_member = episode_layout.member_positions
         with timers.time("env_reset"):
-            obs, _ = env.reset()
+            if hasattr(env, "reset_many"):
+                obs, _ = env.reset_many(episode_layout.reset_seeds)
+            else:
+                obs, _ = env.reset(reset_state_ids=episode_layout.reset_seeds)
         for chunk_steps in iter_chunk_lengths(
             total_steps=config.steps_per_update,
             chunk_horizon=config.chunk_len,
@@ -278,6 +290,16 @@ def evaluate_eggroll_update(
         "seconds_per_member_episode": elapsed_s / max(member_episodes, 1),
         "env_steps_per_second": scalar_env_steps / max(elapsed_s, 1e-12),
         "action_saturation_fraction": float(np.mean(saturation_values)) if saturation_values else 0.0,
+        "fair_seed_layout": {
+            "mode": "common_random_numbers_seed_major",
+            "eval_seeds_per_member": config.envs_per_member,
+            "reset_seed_base": config.reset_seed_base,
+            "member_positions_head": layout.member_positions[
+                : min(16, layout.member_positions.size)
+            ].tolist(),
+            "reset_seeds_head": layout.reset_seeds[: min(16, layout.reset_seeds.size)].tolist(),
+            "unique_reset_seeds": np.unique(layout.reset_seeds).astype(np.int64).tolist(),
+        },
         "timing": timers.payload(),
         "hardware": cuda_payload(device),
     }
@@ -319,6 +341,7 @@ def main() -> int:
             sigma=args.sigma,
             learning_rate=args.learning_rate,
             seed=args.seed,
+            reset_seed_base=args.reset_seed_base,
         )
         if args.verify_batched_equivalence:
             obs, _ = env.reset()
@@ -334,10 +357,11 @@ def main() -> int:
                     sigma=args.sigma,
                     seed=args.seed,
                 ),
-                env_to_member=env_member_positions(
+                env_to_member=common_seed_rollout_layout(
                     population_size=args.population_size,
-                    envs_per_member=args.envs_per_member,
-                ),
+                    eval_seeds_per_member=args.envs_per_member,
+                    reset_seed_base=args.reset_seed_base,
+                ).member_positions,
             )
             emit(metrics_path, "SMOLVLA_EGGROLL_EQUIV_OK" if payload["ok"] else "SMOLVLA_EGGROLL_EQUIV_FAILED", payload)
             if not payload["ok"]:

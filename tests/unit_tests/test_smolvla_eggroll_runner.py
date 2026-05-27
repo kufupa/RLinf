@@ -39,6 +39,7 @@ class FakeEnv:
 
     def __post_init__(self) -> None:
         self.steps = 0
+        self.reset_many_calls = []
         self.states = torch.stack(
             [
                 torch.arange(1, self.num_envs + 1, dtype=torch.float32),
@@ -50,6 +51,10 @@ class FakeEnv:
     def reset(self):
         self.steps = 0
         return {"states": self.states.clone()}, {}
+
+    def reset_many(self, reset_seeds):
+        self.reset_many_calls.append([int(seed) for seed in reset_seeds])
+        return self.reset()
 
     def chunk_step(self, actions):
         actions = np.asarray(actions, dtype=np.float32)
@@ -120,6 +125,7 @@ def test_evaluate_eggroll_update_scores_members_and_updates_target_weight() -> N
         sigma=0.1,
         learning_rate=0.5,
         seed=5,
+        reset_seed_base=2000,
     )
 
     result = evaluate_eggroll_update(
@@ -137,3 +143,33 @@ def test_evaluate_eggroll_update_scores_members_and_updates_target_weight() -> N
     assert result.metrics["seconds_per_member_episode"] > 0.0
     assert len(result.member_scores) == 2
     assert not torch.equal(model.target.weight, before)
+
+
+def test_evaluate_eggroll_update_uses_common_random_seed_rows() -> None:
+    model = FakeModel(chunk_len=2)
+    env = FakeEnv(num_envs=6, chunk_len=2, max_episode_steps=4)
+    config = EggrollRunConfig(
+        population_size=3,
+        envs_per_member=2,
+        episodes_per_member=1,
+        steps_per_update=4,
+        chunk_len=2,
+        rank=1,
+        sigma=0.1,
+        learning_rate=0.5,
+        seed=5,
+        reset_seed_base=2000,
+    )
+
+    result = evaluate_eggroll_update(
+        model=model,
+        env=env,
+        target_module=model.target,
+        target_name="target",
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    assert env.reset_many_calls == [[2000, 2000, 2000, 2001, 2001, 2001]]
+    assert result.metrics["fair_seed_layout"]["member_positions_head"] == [0, 1, 2, 0, 1, 2]
+    assert result.metrics["fair_seed_layout"]["unique_reset_seeds"] == [2000, 2001]

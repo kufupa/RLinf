@@ -111,6 +111,39 @@ into `logs/artifacts/smolvla_bottleneck_<UTC>/`.
   - Recent final-window throughput: about `1.26s/member-episode` and `1.32s/member-episode`; peak PyTorch VRAM about `2.85GB`.
   - Best observed per-update success sums: `18/64` and `20/64`.
   - RCA notes: production attempt `244832` with population `96` OOMed under two concurrent workers; attempt `244834` using nested `srun` isolated GPUs but serialized one worker. Production was relaunched with population `64`, which was proven concurrent-safe in the sweep.
+  - Fairness caveat: optimization quality is exploratory only. This run used different reset seeds per member inside an update.
+
+- `smolvla_eggroll_smoke_244851`
+  - Job: `244851`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_smoke_a30.slurm`
+  - Status: completed successfully in `2:53`.
+  - Fair layout proof: `population=4`, `envs_per_member=2`, total rows `8`.
+  - Markers: `SMOLVLA_EGGROLL_EQUIV_OK`, `SMOLVLA_EGGROLL_UPDATE`, `SMOLVLA_EGGROLL_RUN_OK`, `SMOLVLA_EGGROLL_SMOKE_JOB_OK`.
+  - Layout metadata: member positions `[0,1,2,3,0,1,2,3]`; reset seeds `[2000 x4, 2001 x4]`.
+
+- `smolvla_eggroll_pop_ceiling_244865`
+  - Job: `244865`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_pop_ceiling_a30.slurm`
+  - Purpose: one-GPU A30 ceiling sweep with explicit populations.
+  - Result: `pop128` completed; `pop160` OOMed. `pop192/256` were cancelled as dominated by the `pop160` OOM.
+  - `pop128`: `1.189s/member-episode`, elapsed `152.2s`, PyTorch reserved `4.53GB`, `nvidia-smi` peak memory `20.14GB`, RSS `11.41GB`, mean GPU util `27.6%`.
+  - RCA: first two ceiling attempts exposed campaign bugs. One-GPU sweeps were launching two workers on the same GPU, then explicit population lists were overwritten by the adaptive planner. Fixed by sizing campaign waves to GPU slots and disabling adaptive replacement for explicit lists.
+
+- `smolvla_eggroll_fair_worker_244882`
+  - Job array: `244882_0`, `244882_1`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_fair_worker_array_a30.slurm`
+  - Status: completed successfully; two isolated one-GPU array tasks ran concurrently on separate nodes.
+  - Config: population `24`, eval seeds per member `4`, total rows `96`, `10` updates, reset seed base `2000`.
+  - Fair layout: reset seeds `[2000, 2001, 2002, 2003]`, each repeated across all members; member positions `[0..23]` repeated once per seed.
+  - Last update throughput: `1.141s/member-episode` and `1.127s/member-episode`.
+  - Last update resources: about `15.49GB` nvidia-smi GPU memory, `~10GB` RSS, `36.8-39.7%` GPU util.
+  - RCA: local two-worker subprocesses and nested `srun` were unreliable on gpucluster3 for concurrent two-GPU fairness runs. Separate one-GPU Slurm array tasks provided clean GPU isolation.
+
+- `smolvla_eggroll_fair_worker_244901`
+  - Job array: `244901_0`, `244901_1`
+  - Script: `scripts/slurm/smolvla_metaworld_eggroll_fair_worker_array_a30.slurm`
+  - Status: queued/running as long fair production.
+  - Config: population `24`, eval seeds per member `4`, total rows `96`, `50` updates.
 
 ## Raw Artifact Collection
 

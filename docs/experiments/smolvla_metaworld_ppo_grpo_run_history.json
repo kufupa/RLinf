@@ -229,7 +229,108 @@
       "final_target_weights": [
         "logs/results/smolvla_eggroll_production_244837/seed_5000/target_weight_final.npy",
         "logs/results/smolvla_eggroll_production_244837/seed_6000/target_weight_final.npy"
+      ],
+      "fairness_caveat": "Exploratory optimization quality only; members used different reset seeds within an update."
+    },
+    {
+      "name": "smolvla_eggroll_smoke_244851",
+      "job_id": "244851",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_smoke_a30.slurm",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "1x A30 on a30",
+      "task": "push-v3",
+      "max_episode_steps": 120,
+      "population_size": 4,
+      "eval_seeds_per_member": 2,
+      "total_env_rows": 8,
+      "status": "completed_successfully",
+      "walltime": "00:02:53",
+      "fair_seed_layout": {
+        "mode": "common_random_numbers_seed_major",
+        "unique_reset_seeds": [
+          2000,
+          2001
+        ]
+      },
+      "markers": [
+        "SMOLVLA_EGGROLL_EQUIV_OK",
+        "SMOLVLA_EGGROLL_UPDATE",
+        "SMOLVLA_EGGROLL_RUN_OK",
+        "SMOLVLA_EGGROLL_SMOKE_JOB_OK"
       ]
+    },
+    {
+      "name": "smolvla_eggroll_pop_ceiling_244865",
+      "job_id": "244865",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_pop_ceiling_a30.slurm",
+      "controller": "scripts/run_smolvla_eggroll_campaign.py",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "1x A30 on a30, 16 CPU request, 200G RAM",
+      "population_list": [
+        128,
+        160,
+        192,
+        256
+      ],
+      "completed_population_size": 128,
+      "oom_population_size": 160,
+      "best_seconds_per_member_episode": 1.189195045757515,
+      "best_elapsed_s": 152.216966,
+      "best_pytorch_peak_reserved_gb": 4.532,
+      "best_nvidia_smi_peak_memory_gb": 20.139,
+      "best_rss_gb": 11.407,
+      "best_gpu_util_percent_mean": 27.58823529411765,
+      "status": "cancelled_after_oom_ceiling_found",
+      "rca": "A30 one-worker ceiling is between 128 and 160 env rows for this target/checkpoint. Earlier attempts exposed and fixed one-GPU campaign overlap and explicit-list adaptive override bugs."
+    },
+    {
+      "name": "smolvla_eggroll_fair_worker_244882",
+      "job_id": "244882",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_fair_worker_array_a30.slurm",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "2 isolated 1x A30 array tasks",
+      "population_size": 24,
+      "eval_seeds_per_member": 4,
+      "total_env_rows_per_worker": 96,
+      "total_updates": 10,
+      "status": "completed_successfully",
+      "last_update_seconds_per_member_episode": [
+        1.1405540421934954,
+        1.1269102945904403
+      ],
+      "last_update_nvidia_smi_peak_memory_gb": [
+        15.49,
+        15.49
+      ],
+      "last_update_rss_gb": [
+        10.0,
+        9.98
+      ],
+      "last_update_gpu_util_percent_mean": [
+        36.76470588235294,
+        39.666666666666664
+      ],
+      "fair_seed_layout": {
+        "mode": "common_random_numbers_seed_major",
+        "unique_reset_seeds": [
+          2000,
+          2001,
+          2002,
+          2003
+        ]
+      }
+    },
+    {
+      "name": "smolvla_eggroll_fair_worker_244901",
+      "job_id": "244901",
+      "slurm_script": "scripts/slurm/smolvla_metaworld_eggroll_fair_worker_array_a30.slurm",
+      "runner": "scripts/run_smolvla_metaworld_eggroll.py",
+      "gpu_request": "2 isolated 1x A30 array tasks",
+      "population_size": 24,
+      "eval_seeds_per_member": 4,
+      "total_env_rows_per_worker": 96,
+      "total_updates": 50,
+      "status": "queued_or_running"
     }
   ],
   "artifact_collection": {

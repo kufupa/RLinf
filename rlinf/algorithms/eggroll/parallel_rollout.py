@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 import numpy as np
 
 from rlinf.algorithms.eggroll.population import EggrollMember
+
+
+@dataclass(frozen=True)
+class CommonSeedRolloutLayout:
+    member_positions: np.ndarray
+    reset_seeds: np.ndarray
 
 
 def resolve_rollout_sizes(
@@ -27,6 +34,29 @@ def env_member_positions(*, population_size: int, envs_per_member: int) -> np.nd
     if envs_per_member < 1:
         raise ValueError("envs_per_member must be >= 1")
     return np.repeat(np.arange(population_size, dtype=np.int64), envs_per_member)
+
+
+def common_seed_rollout_layout(
+    *,
+    population_size: int,
+    eval_seeds_per_member: int,
+    reset_seed_base: int,
+) -> CommonSeedRolloutLayout:
+    if population_size < 1:
+        raise ValueError("population_size must be >= 1")
+    if eval_seeds_per_member < 1:
+        raise ValueError("eval_seeds_per_member must be >= 1")
+
+    member_positions = np.tile(np.arange(population_size, dtype=np.int64), eval_seeds_per_member)
+    reset_seeds = np.repeat(
+        np.arange(
+            int(reset_seed_base),
+            int(reset_seed_base) + int(eval_seeds_per_member),
+            dtype=np.int64,
+        ),
+        population_size,
+    )
+    return CommonSeedRolloutLayout(member_positions=member_positions, reset_seeds=reset_seeds)
 
 
 def aggregate_member_scores(

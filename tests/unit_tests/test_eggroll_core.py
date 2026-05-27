@@ -134,6 +134,19 @@ def test_env_member_positions_repeats_each_member_for_env_replicas() -> None:
     assert positions.tolist() == [0, 0, 1, 1, 2, 2]
 
 
+def test_common_seed_rollout_layout_repeats_each_seed_for_all_members() -> None:
+    from rlinf.algorithms.eggroll.parallel_rollout import common_seed_rollout_layout
+
+    layout = common_seed_rollout_layout(
+        population_size=3,
+        eval_seeds_per_member=2,
+        reset_seed_base=2000,
+    )
+
+    assert layout.member_positions.tolist() == [0, 1, 2, 0, 1, 2]
+    assert layout.reset_seeds.tolist() == [2000, 2000, 2000, 2001, 2001, 2001]
+
+
 def test_aggregate_member_scores_averages_replicas_per_member() -> None:
     members = [_member(10), _member(11), _member(12)]
     positions = np.array([0, 0, 1, 1, 2, 2], dtype=np.int64)

@@ -402,6 +402,17 @@ def test_metaworld_reset_many_uses_explicit_seed_rows(monkeypatch):
     torch.testing.assert_close(obs["reset_seeds"], torch.tensor([2000, 2000, 2001, 2001]))
 
 
+def test_seed_metaworld_process_numpy_repeatable():
+    from rlinf.envs.metaworld.determinism import seed_metaworld_process
+
+    seed_metaworld_process(12345)
+    first = float(np.random.random())
+    seed_metaworld_process(12345)
+    second = float(np.random.random())
+
+    assert first == second
+
+
 def test_metaworld_chunk_step_reports_all_rows_terminal(monkeypatch):
     from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
 

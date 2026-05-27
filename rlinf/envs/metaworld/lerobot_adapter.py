@@ -12,6 +12,8 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 
+from rlinf.envs.metaworld.determinism import seed_metaworld_process
+
 os.environ.setdefault("MUJOCO_GL", "osmesa")
 os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
 
@@ -155,6 +157,8 @@ class DeferredLeRobotMetaworldEnv(gym.Env):
         self, seed: int | None = None, **kwargs: Any
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         self._ensure_env()
+        if seed is not None:
+            seed_metaworld_process(int(seed))
         super().reset(seed=seed)
         self._env._freeze_rand_vec = self.reset_randomization_mode == "fixed"
         if self.reset_randomization_mode == "lerobot_default":

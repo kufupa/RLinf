@@ -21,6 +21,7 @@ from rlinf.algorithms.eggroll.population import EggrollMember
 from rlinf.algorithms.eggroll.population import EggrollPopulationConfig
 from rlinf.algorithms.eggroll.population import aggregate_weighted_delta
 from rlinf.algorithms.eggroll.population import sample_population
+from rlinf.algorithms.eggroll.resource_monitor import ResourceMonitor
 from rlinf.algorithms.eggroll.targets import find_eggroll_targets
 from scripts.run_smolvla_metaworld_direct_ppo import DEFAULT_CHECKPOINT
 from scripts.run_smolvla_metaworld_direct_ppo import TimingStats
@@ -207,6 +208,8 @@ def evaluate_eggroll_update(
     env_totals = np.zeros(expected_envs, dtype=np.float32)
     scalar_env_steps = 0
     saturation_values: list[float] = []
+    resource_monitor = ResourceMonitor()
+    resource_monitor.sample()
 
     for episode_index in range(config.episodes_per_member):
         episode_layout = common_seed_rollout_layout(
@@ -220,6 +223,7 @@ def evaluate_eggroll_update(
                 obs, _ = env.reset_many(episode_layout.reset_seeds)
             else:
                 obs, _ = env.reset(reset_state_ids=episode_layout.reset_seeds)
+        resource_monitor.sample()
         for chunk_steps in iter_chunk_lengths(
             total_steps=config.steps_per_update,
             chunk_horizon=config.chunk_len,
@@ -237,6 +241,7 @@ def evaluate_eggroll_update(
                             mode="eval",
                             compute_values=False,
                         )
+            resource_monitor.sample()
             actions = actions[:, :chunk_steps, :]
             saturation_values.append(
                 action_saturation_fraction(
@@ -249,6 +254,7 @@ def evaluate_eggroll_update(
                 chunk_actions = actions.detach().cpu().numpy()
             with timers.time("env_chunk_step"):
                 obs_list, rewards, terms, truncs, infos_list = env.chunk_step(chunk_actions)
+            resource_monitor.sample()
 
             final_info = infos_list[-1] if infos_list else {}
             valid_mask = final_info.get(
@@ -275,6 +281,7 @@ def evaluate_eggroll_update(
         )
 
     elapsed_s = time.perf_counter() - started
+    resource_monitor.sample()
     member_episodes = config.population_size * config.envs_per_member * config.episodes_per_member
     metrics = {
         "target_name": target_name,
@@ -301,6 +308,7 @@ def evaluate_eggroll_update(
             "unique_reset_seeds": np.unique(layout.reset_seeds).astype(np.int64).tolist(),
         },
         "timing": timers.payload(),
+        "resources": resource_monitor.summary(),
         "hardware": cuda_payload(device),
     }
     return EggrollUpdateResult(metrics=metrics, member_scores=scored_members, dense_update=dense_update)

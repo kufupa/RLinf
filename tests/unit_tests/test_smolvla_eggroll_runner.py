@@ -87,6 +87,23 @@ def test_action_saturation_fraction_counts_near_bounds() -> None:
     assert action_saturation_fraction(actions, action_low=-1.0, action_high=1.0) == 0.5
 
 
+def test_parse_nvidia_smi_csv_rows() -> None:
+    from rlinf.algorithms.eggroll.resource_monitor import parse_nvidia_smi_csv
+
+    rows = parse_nvidia_smi_csv("0, GPU-a30, 37, 12, 4096, 24576\n")
+
+    assert rows == [
+        {
+            "index": "0",
+            "name": "GPU-a30",
+            "gpu_util_percent": 37.0,
+            "memory_util_percent": 12.0,
+            "memory_used_mb": 4096.0,
+            "memory_total_mb": 24576.0,
+        }
+    ]
+
+
 def test_verify_batched_equivalence_matches_serial_member_patches() -> None:
     model = FakeModel(chunk_len=2)
     obs = {"states": torch.tensor([[1.0, 2.0], [2.0, 1.0]])}

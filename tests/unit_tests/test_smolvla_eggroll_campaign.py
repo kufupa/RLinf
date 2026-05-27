@@ -63,6 +63,13 @@ def test_worker_wave_size_tracks_available_gpu_slots() -> None:
     assert module.worker_wave_size(["0", "1", "2"]) == 3
 
 
+def test_explicit_population_list_disables_adaptive_planner() -> None:
+    module = _load_campaign()
+
+    assert module.should_adapt_population_list([]) is True
+    assert module.should_adapt_population_list([128, 160, 192, 256]) is False
+
+
 def test_build_worker_command_uses_one_allocation_not_nested_sbatch(tmp_path: Path) -> None:
     module = _load_campaign()
     config = module.WorkerConfig(

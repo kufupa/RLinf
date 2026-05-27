@@ -109,6 +109,10 @@ def worker_wave_size(gpu_slots: list[str]) -> int:
     return max(1, len(gpu_slots))
 
 
+def should_adapt_population_list(explicit_populations: list[int]) -> bool:
+    return len(explicit_populations) == 0
+
+
 def build_worker_command(config: WorkerConfig, *, cpus_per_worker: int) -> list[str]:
     python_bin = os.environ.get("PYTHON_BIN", "python")
     return [
@@ -289,6 +293,7 @@ def main() -> int:
     summary_path = out_dir / "campaign_summary.json"
     history: list[WorkerResult] = []
     explicit_populations = parse_population_list(args.population_list)
+    adapt_populations = should_adapt_population_list(explicit_populations)
     pending = explicit_populations or [4, 16, 32, 48, 64, 80, 96]
     pending = [pop for pop in pending if pop <= args.max_population_soft]
     gpu_slots = [slot.strip() for slot in args.gpu_slots.split(",") if slot.strip()]
@@ -324,9 +329,9 @@ def main() -> int:
                 handoff,
                 f"- `{result.population_size}`: `{json.dumps(asdict(result), sort_keys=True)}`",
             )
-        if any(result.ok for result in wave_results):
+        if adapt_populations and any(result.ok for result in wave_results):
             pending = next_population_candidates(history, max_population_soft=args.max_population_soft)
-        elif any(result.failure_kind == "cuda_oom" for result in wave_results):
+        elif adapt_populations and any(result.failure_kind == "cuda_oom" for result in wave_results):
             pending = next_population_candidates(history, max_population_soft=args.max_population_soft)
         if not pending:
             break

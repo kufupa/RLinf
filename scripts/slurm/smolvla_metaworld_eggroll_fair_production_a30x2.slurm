@@ -34,29 +34,39 @@ launch_worker() {
   local run_dir="${OUTPUT_DIR}/seed_${seed}"
   mkdir -p "${run_dir}"
   (
-    cd "${RLINF_ROOT}"
-    export CUDA_VISIBLE_DEVICES="${slot}"
+    export WORKER_SLOT="${slot}"
+    export WORKER_SEED="${seed}"
+    export WORKER_RUN_DIR="${run_dir}"
+    export WORKER_RUN_NAME="smolvla_eggroll_fair_${RUN_ID}_seed_${seed}"
     export OMP_NUM_THREADS="${THREADS_PER_WORKER}"
     export MKL_NUM_THREADS="${THREADS_PER_WORKER}"
     export OPENBLAS_NUM_THREADS="${THREADS_PER_WORKER}"
-    echo "SMOLVLA_EGGROLL_FAIR_WORKER slot=${slot} seed=${seed} pid=$$ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} OMP_NUM_THREADS=${OMP_NUM_THREADS}"
-    nvidia-smi || true
-    "${PYTHON_BIN}" scripts/run_smolvla_metaworld_eggroll.py \
-      --run-name "smolvla_eggroll_fair_${RUN_ID}_seed_${seed}" \
-      --output-dir "${run_dir}" \
-      --target-name "${TARGET_NAME}" \
-      --population-size "${POPULATION_SIZE}" \
-      --envs-per-member "${EVAL_SEEDS_PER_MEMBER}" \
-      --episodes-per-member 1 \
-      --total-updates "${TOTAL_UPDATES}" \
-      --steps-per-update 120 \
-      --chunk-len 5 \
-      --max-episode-steps 120 \
-      --rank 1 \
-      --sigma 1e-4 \
-      --learning-rate 1e-3 \
-      --reset-seed-base 2000 \
-      --seed "${seed}"
+    srun --exclusive --exact --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task="${THREADS_PER_WORKER}" \
+      bash -lc '
+        set -euo pipefail
+        cd "${RLINF_ROOT}"
+        export OMP_NUM_THREADS="${OMP_NUM_THREADS}"
+        export MKL_NUM_THREADS="${MKL_NUM_THREADS}"
+        export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS}"
+        echo "SMOLVLA_EGGROLL_FAIR_WORKER slot=${WORKER_SLOT} seed=${WORKER_SEED} pid=$$ CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset} SLURM_STEP_GPUS=${SLURM_STEP_GPUS:-unset} OMP_NUM_THREADS=${OMP_NUM_THREADS}"
+        nvidia-smi || true
+        "${PYTHON_BIN}" scripts/run_smolvla_metaworld_eggroll.py \
+          --run-name "${WORKER_RUN_NAME}" \
+          --output-dir "${WORKER_RUN_DIR}" \
+          --target-name "${TARGET_NAME}" \
+          --population-size "${POPULATION_SIZE}" \
+          --envs-per-member "${EVAL_SEEDS_PER_MEMBER}" \
+          --episodes-per-member 1 \
+          --total-updates "${TOTAL_UPDATES}" \
+          --steps-per-update 120 \
+          --chunk-len 5 \
+          --max-episode-steps 120 \
+          --rank 1 \
+          --sigma 1e-4 \
+          --learning-rate 1e-3 \
+          --reset-seed-base 2000 \
+          --seed "${WORKER_SEED}"
+      '
   ) >"${run_dir}/worker_stdout.log" 2>&1 &
 }
 

@@ -90,8 +90,10 @@ class FakeMetaWorldRollout:
         self.success_steps = np.asarray(success_steps, dtype=np.int64)
         self.n_envs = int(self.success_steps.shape[0])
         self.steps = np.zeros(self.n_envs, dtype=np.int64)
+        self.reset_many_calls = []
 
     def reset_many(self, seeds):
+        self.reset_many_calls.append([int(seed) for seed in seeds])
         self.steps[:] = 0
         return {
             "pixels": np.zeros((self.n_envs, 8, 8, 3), dtype=np.uint8),
@@ -364,6 +366,40 @@ def test_metaworld_chunk_step_masks_terminal_tail(monkeypatch):
     assert bool(terms[0, 1])
     assert not bool(terms[0, 2:].any())
     assert not bool(truncs.any())
+
+
+def test_metaworld_reset_many_uses_explicit_seed_rows(monkeypatch):
+    from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
+
+    rollout = FakeMetaWorldRollout(success_steps=[5, 5, 5, 5])
+    cfg = OmegaConf.create(
+        {
+            "seed": 0,
+            "task_name": "push-v3",
+            "task_description": "Push the puck to a goal",
+            "reset_randomization_mode": "random_seeded",
+            "max_episode_steps": 10,
+            "auto_reset": False,
+            "ignore_terminations": False,
+            "use_rel_reward": True,
+            "reward_coef": 1.0,
+            "reward_mode": "sparse_success_delta",
+            "reset_seed_base": 2000,
+            "use_async_envs": False,
+            "video_cfg": {"save_video": False},
+        }
+    )
+    with _patch_metaworld_rollout(monkeypatch, rollout):
+        env = SmolVLAMetaWorldEnv(
+            cfg, num_envs=4, seed_offset=0, total_num_processes=1, worker_info=None
+        )
+        try:
+            obs, _ = env.reset_many([2000, 2000, 2001, 2001])
+        finally:
+            env.close()
+
+    assert rollout.reset_many_calls == [[2000, 2000, 2001, 2001]]
+    torch.testing.assert_close(obs["reset_seeds"], torch.tensor([2000, 2000, 2001, 2001]))
 
 
 def test_metaworld_chunk_step_reports_all_rows_terminal(monkeypatch):

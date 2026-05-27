@@ -178,7 +178,14 @@ class SmolVLAMetaWorldEnv(gym.Env):
                     "Use auto_reset=False for PPO smoke."
                 )
 
-        seeds = self._next_reset_seeds(self.num_envs)
+        if reset_state_ids is not None:
+            return self.reset_many(reset_state_ids)
+        return self.reset_many(self._next_reset_seeds(self.num_envs))
+
+    def reset_many(self, reset_seeds):
+        seeds = np.asarray([int(seed) for seed in reset_seeds], dtype=np.int64)
+        if seeds.shape != (self.num_envs,):
+            raise ValueError(f"reset_many expected {self.num_envs} seeds; got {seeds.shape[0]}")
         self.reset_seeds = seeds
         self.reset_state_ids = seeds.copy()
         raw_obs = self.env.reset_many(seeds)

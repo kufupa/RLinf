@@ -6,6 +6,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -268,6 +269,7 @@ def evaluate_eggroll_update(
         "population_size": config.population_size,
         "envs_per_member": config.envs_per_member,
         "episodes_per_member": config.episodes_per_member,
+        "population_seed": config.seed,
         "member_episodes": member_episodes,
         "steps_per_update": config.steps_per_update,
         "chunk_len": config.chunk_len,
@@ -342,12 +344,13 @@ def main() -> int:
                 return 3
 
         for update in range(1, args.total_updates + 1):
+            update_config = replace(run_config, seed=run_config.seed + update - 1)
             result = evaluate_eggroll_update(
                 model=model,
                 env=env,
                 target_module=target_module,
                 target_name=target_name,
-                config=run_config,
+                config=update_config,
                 device=device,
             )
             np.save(output_dir / f"dense_update_{update:06d}.npy", result.dense_update)

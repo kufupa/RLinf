@@ -364,6 +364,15 @@ def main() -> int:
                     ],
                 },
             )
+        np.save(output_dir / "target_weight_final.npy", target_module.weight.detach().float().cpu().numpy())
+        emit(
+            metrics_path,
+            "SMOLVLA_EGGROLL_TARGET_WEIGHT_SAVED",
+            {
+                "path": str(output_dir / "target_weight_final.npy"),
+                "target_name": target_name,
+            },
+        )
         emit(metrics_path, "SMOLVLA_EGGROLL_RUN_OK", {"run_name": args.run_name, "updates": args.total_updates})
         return 0
     finally:

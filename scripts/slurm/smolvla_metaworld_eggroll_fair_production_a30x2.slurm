@@ -19,7 +19,7 @@ TARGET_NAME="${SMOLVLA_EGGROLL_TARGET_NAME:-vlm_with_expert.lm_expert.layers.1.s
 POPULATION_SIZE="${SMOLVLA_EGGROLL_PROD_POPULATION:-24}"
 TOTAL_UPDATES="${SMOLVLA_EGGROLL_PROD_UPDATES:-10}"
 EVAL_SEEDS_PER_MEMBER="${SMOLVLA_EGGROLL_EVAL_SEEDS_PER_MEMBER:-4}"
-THREADS_PER_WORKER="${SMOLVLA_EGGROLL_THREADS_PER_WORKER:-14}"
+THREADS_PER_WORKER="${SMOLVLA_EGGROLL_THREADS_PER_WORKER:-6}"
 export OUTPUT_DIR
 mkdir -p "${OUTPUT_DIR}"
 
@@ -42,7 +42,7 @@ launch_worker() {
     export MKL_NUM_THREADS="${THREADS_PER_WORKER}"
     export OPENBLAS_NUM_THREADS="${THREADS_PER_WORKER}"
     srun --exclusive --exact --nodes=1 --ntasks=1 --gres=gpu:1 --cpus-per-task="${THREADS_PER_WORKER}" \
-      bash -lc '
+      /bin/bash -lc '
         set -euo pipefail
         cd "${RLINF_ROOT}"
         export OMP_NUM_THREADS="${OMP_NUM_THREADS}"
@@ -86,7 +86,6 @@ from pathlib import Path
 
 output_dir = Path(os.environ["OUTPUT_DIR"])
 summaries = []
-ok = True
 for metrics_path in sorted(output_dir.glob("seed_*/metrics.jsonl")):
     run_ok = False
     updates = []
@@ -108,7 +107,7 @@ for metrics_path in sorted(output_dir.glob("seed_*/metrics.jsonl")):
             "resources": last.get("resources"),
         }
     )
-    ok = ok and run_ok
+ok = bool(summaries) and all(item["ok"] for item in summaries)
 payload = {
     "marker": "SMOLVLA_EGGROLL_FAIR_PRODUCTION_OK" if ok else "SMOLVLA_EGGROLL_FAIR_PRODUCTION_FAILED",
     "runs": summaries,

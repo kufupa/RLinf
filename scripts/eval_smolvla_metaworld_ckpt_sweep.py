@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,11 @@ from typing import Any
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from torch_load_mmap import torch_load_mmap_with_mode
 
 from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
 from rlinf.models.embodiment.smolvla import get_model
@@ -118,7 +124,11 @@ def make_model(args: argparse.Namespace, device: torch.device):
 
 
 def load_trainable_delta(model: torch.nn.Module, ckpt_path: Path) -> dict[str, Any]:
-    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    checkpoint, _load_mode = torch_load_mmap_with_mode(
+        ckpt_path,
+        map_location="cpu",
+        weights_only=False,
+    )
     trainable = checkpoint.get("trainable_model")
     if not isinstance(trainable, dict):
         raise KeyError(f"{ckpt_path} missing trainable_model")

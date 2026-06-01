@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -12,6 +13,11 @@ from typing import Any
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from torch_load_mmap import torch_load_mmap_default
 
 from rlinf.envs.metaworld.smolvla_metaworld_env import SmolVLAMetaWorldEnv
 from rlinf.models.embodiment.smolvla import get_model
@@ -293,7 +299,7 @@ def load_trainable_checkpoint(
     checkpoint_path: str,
     device: torch.device,
 ) -> tuple[int, dict[str, Any]]:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = torch_load_mmap_default(checkpoint_path, map_location="cpu")
     trainable_state = checkpoint.get("trainable_model")
     if not isinstance(trainable_state, dict):
         raise KeyError(f"{checkpoint_path} missing trainable_model")

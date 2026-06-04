@@ -251,6 +251,11 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
             ) from exc
         return proc
 
+    def _clear_policy_forward_state(self) -> None:
+        policy_reset = getattr(self.policy, "reset", None)
+        if callable(policy_reset):
+            policy_reset()
+
     def _get_distr_params_chunk_batch(
         self,
         proc: dict[str, Any],
@@ -258,6 +263,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         n_envs: int,
         chunk_len: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        self._clear_policy_forward_state()
         device = _first_tensor_device(proc)
         param_dtype = self._floating_param_dtype()
         if (
@@ -437,11 +443,25 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         proc = _unflatten_tensor_tree(forward_inputs)
         proc = _to_device(proc, device, dtype=self._floating_param_dtype())
         unsquashed = forward_inputs["smolvla_unsquashed_actions"].to(device)
-        batch_size = int(unsquashed.shape[0])
+        if unsquashed.ndim == 3:
+            n_envs, chunk_len, action_dim = unsquashed.shape
+            if int(action_dim) != self.action_dim:
+                raise RuntimeError(
+                    f"smolvla_unsquashed_actions action_dim={action_dim} "
+                    f"!= {self.action_dim}"
+                )
+        elif unsquashed.ndim == 2:
+            n_envs = int(unsquashed.shape[0])
+            chunk_len = self.num_action_chunks
+            unsquashed = unsquashed.reshape(n_envs, chunk_len, self.action_dim)
+        else:
+            raise RuntimeError(
+                f"smolvla_unsquashed_actions must be 2D or 3D, got {tuple(unsquashed.shape)}"
+            )
         mean, log_std = self._get_distr_params_chunk_batch(
             proc,
-            n_envs=batch_size,
-            chunk_len=self.num_action_chunks,
+            n_envs=int(n_envs),
+            chunk_len=int(chunk_len),
         )
 
         output_dict = {}

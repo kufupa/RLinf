@@ -32,8 +32,8 @@ runner:
     experiment_name: "metaworld_pushv3_wm_flowsde_tf_smolvla"
     logger_backends: ["tensorboard"]
 
-  max_epochs: 1
-  max_steps: 20
+  max_epochs: 20
+  max_steps: -1
   only_eval: False
   val_check_interval: -1
   save_interval: 5

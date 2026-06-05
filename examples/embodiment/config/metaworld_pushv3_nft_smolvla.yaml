@@ -1,0 +1,162 @@
+defaults:
+  - env/metaworld_smolvla_pushv3@env.train
+  - env/metaworld_smolvla_pushv3@env.eval
+  - model/smolvla@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  ray:
+    address: auto
+    temp_dir: null
+    include_dashboard: null
+  component_placement:
+    actor,env,rollout: all
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "metaworld_pushv3_nft_smolvla"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 20
+  max_steps: -1
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 5
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  normalize_advantages: True
+  group_size: 16
+  reward_coef: 1.0
+
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+  reward_type: chunk_level
+  logprob_type: chunk_level
+
+  update_epoch: 1
+  adv_type: grpo
+  loss_type: embodied_nft
+  filter_rewards: True
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+
+  nft_loss_form: dgpo
+  nft_beta: 1.0
+  adv_clip_max: 0.5
+  dpo_beta: 10.0
+  max_drift: 0.3
+  nft_weight_mode: "auto"
+  nft_weight_scale: [1.0, 0.2]
+  nft_target_space: "x0"
+  nft_xcur_source: "resample"
+  nft_tau: 1.0
+  nft_sum_type: chunk_level
+  recompute_v: False
+
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    temperature_eval: 0.0
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: False
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+  train:
+    total_num_envs: 32
+    group_size: ${algorithm.group_size}
+    max_steps_per_rollout_epoch: 120
+    max_episode_steps: 120
+    reward_mode: sparse_success_delta
+    use_rel_reward: True
+  eval:
+    total_num_envs: 25
+    auto_reset: False
+    ignore_terminations: False
+    max_steps_per_rollout_epoch: 150
+    max_episode_steps: 150
+    group_size: 1
+    is_eval: True
+    reward_mode: sparse_success_delta
+    use_rel_reward: True
+    eval_seed_list: [1000, 1001, 1002, 1003]
+    video_cfg:
+      save_video: False
+      video_base_dir: ${runner.logger.log_path}/video/eval
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  collect_prev_infos: True
+  enable_offload: False
+  pipeline_stage_num: 1
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 8
+  global_batch_size: 32
+  seed: 42
+  enable_offload: False
+  model:
+    model_path: "jadechoghari/smolvla_metaworld"
+    num_action_chunks: 5
+    action_dim: 4
+    n_action_steps: 5
+    add_value_head: True
+    detach_critic_input: True
+    is_nft: True
+    noise_method: flow_ode
+    noise_level: 0
+    num_steps: 10
+    flow_sde_num_steps: 10
+    flow_sde_noise_level: 0.0
+  optim:
+    lr: 5.0e-6
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+    critic_warmup_steps: 0
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: False
+    use_orig_params: True
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

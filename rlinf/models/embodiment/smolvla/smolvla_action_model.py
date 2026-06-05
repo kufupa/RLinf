@@ -117,6 +117,19 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         self.noise_method = str(cfg.get("noise_method", "gaussian"))
         self.flow_sde_num_steps = int(cfg.get("flow_sde_num_steps", 10))
         self.flow_sde_noise_level = float(cfg.get("flow_sde_noise_level", 1.0))
+        self.num_steps = int(cfg.get("num_steps", self.flow_sde_num_steps))
+        self.noise_level = float(
+            cfg.get("noise_level", cfg.get("flow_sde_noise_level", 0.0))
+        )
+        self.is_nft = bool(cfg.get("is_nft", False))
+        try:
+            from omegaconf import OmegaConf, open_dict
+
+            if OmegaConf.is_config(cfg):
+                with open_dict(cfg):
+                    cfg.num_steps = self.num_steps
+        except Exception:
+            pass
         self._bundle = bundle if bundle is not None else self._load_bundle(cfg)
         self.policy = self._bundle.policy
         self.preprocessor = self._bundle.preprocessor
@@ -194,7 +207,49 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
     def forward(self, forward_type=ForwardType.DEFAULT, **kwargs):
         if forward_type == ForwardType.DEFAULT:
             return self.default_forward(**kwargs)
+        if forward_type == ForwardType.NFT:
+            return self.nft_forward(**kwargs)
         return super().forward(forward_type=forward_type, **kwargs)
+
+    def nft_forward(
+        self,
+        forward_inputs: dict[str, torch.Tensor],
+        nft_inputs: dict[str, torch.Tensor],
+        compute_values: bool = False,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """Velocity v_theta at explicit (x_t, timesteps) for NFT/DGPO loss."""
+        device = next(self.parameters()).device
+        proc = _unflatten_tensor_tree(forward_inputs)
+        proc = _to_device(proc, device, dtype=self._floating_param_dtype())
+        prefix_pad_masks, past_key_values, _ = self._build_smolvla_flow_cache(
+            proc, device
+        )
+        model = self.policy.model
+        x_t = nft_inputs["x_t"].to(device)
+        timesteps = nft_inputs["timesteps"].to(device)
+        param_dtype = self._floating_param_dtype()
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=param_dtype)
+            if device.type == "cuda"
+            and param_dtype in {torch.bfloat16, torch.float16}
+            else nullcontext()
+        )
+        with autocast_context:
+            v_t = model.denoise_step(
+                prefix_pad_masks=prefix_pad_masks,
+                past_key_values=past_key_values,
+                x_t=x_t,
+                timestep=timesteps,
+            )
+        result: dict[str, Any] = {
+            "v_theta": v_t,
+            "x_t": x_t,
+            "timesteps": timesteps,
+        }
+        if compute_values and hasattr(self, "value_head"):
+            result["values"] = self._values_from_proc(proc, compute_values=True)
+        return result
 
     def _build_raw_batch(self, env_obs: dict[str, Any]) -> dict[str, Any]:
         images = env_obs["main_images"]
@@ -572,22 +627,46 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         proc = _to_device(proc, device, dtype=self._floating_param_dtype())
         batch_size = int(_get_proc_value(proc, self.obs_state_key).shape[0])
 
-        if self.noise_method == "flow_sde":
+        if self.noise_method in ("flow_sde", "flow_ode"):
+            sample_mode = mode if self.noise_method == "flow_sde" else "eval"
+            saved_noise_level = self.flow_sde_noise_level
+            if self.noise_method == "flow_ode":
+                self.flow_sde_noise_level = self.noise_level
             unsquashed, chains, denoise_inds = self._flow_sde_sample(
-                proc, n_envs=batch_size, mode=mode
+                proc, n_envs=batch_size, mode=sample_mode
             )
+            if self.noise_method == "flow_ode":
+                self.flow_sde_noise_level = saved_noise_level
             actions = self._postprocess_actions(unsquashed)
-            prev_logprobs = self._flow_sde_logprob_from_chains(proc, chains, denoise_inds)
+            if self.noise_method == "flow_sde":
+                prev_logprobs = self._flow_sde_logprob_from_chains(
+                    proc, chains, denoise_inds
+                )
+            else:
+                prev_logprobs = torch.zeros(
+                    batch_size,
+                    self.num_action_chunks,
+                    self.action_dim,
+                    device=device,
+                    dtype=torch.float32,
+                )
             prev_values = self._values_from_proc(proc, compute_values=compute_values)
             forward_inputs = _flatten_tensor_tree(proc)
-            forward_inputs["chains"] = chains.detach().cpu().contiguous()
-            forward_inputs["denoise_inds"] = denoise_inds.detach().cpu().contiguous()
+            if self.noise_method == "flow_sde":
+                forward_inputs["chains"] = chains.detach().cpu().contiguous()
+                forward_inputs["denoise_inds"] = denoise_inds.detach().cpu().contiguous()
             forward_inputs["smolvla_unsquashed_actions"] = (
                 unsquashed.detach().cpu().contiguous()
             )
             forward_inputs["action"] = (
                 actions.detach().reshape(batch_size, -1).cpu().contiguous()
             )
+            collect_nft_state = self.is_nft and mode == "train"
+            if collect_nft_state:
+                forward_inputs["nft_x0"] = chains[:, -1].detach().cpu().contiguous()
+                forward_inputs["nft_noise_level"] = torch.zeros(
+                    batch_size, dtype=torch.float32
+                ).cpu()
             return actions, {
                 "prev_logprobs": prev_logprobs.detach(),
                 "prev_values": prev_values.detach(),

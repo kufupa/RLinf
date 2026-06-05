@@ -456,8 +456,9 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         bsize = int(state.shape[0])
         action_dim = int(self.policy.config.action_feature.shape[0])
         chunk_size = int(model.config.chunk_size)
+        max_action_dim = int(model.config.max_action_dim)
         noise = torch.randn(
-            (bsize, chunk_size, model.config.max_action_dim),
+            (bsize, chunk_size, max_action_dim),
             device=device,
             dtype=torch.float32,
         )
@@ -489,8 +490,8 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                     x_t = mean
                 chain_steps.append(x_t.detach().cpu())
                 time = time + dt
-        chains = torch.stack(chain_steps, dim=1)[..., :action_dim]
-        final = chains[:, -1].to(device=device, dtype=torch.float32)
+        chains = torch.stack(chain_steps, dim=1)
+        final = chains[:, -1, :, :action_dim].to(device=device, dtype=torch.float32)
         denoise_inds = (
             torch.arange(num_steps, device=device, dtype=torch.long)[None]
             .expand(bsize, -1)
@@ -514,6 +515,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         num_steps = int(self.flow_sde_num_steps)
         dt = -1.0 / float(num_steps)
         bsize = int(chains.shape[0])
+        action_dim = int(self.policy.config.action_feature.shape[0])
         total_lp = torch.zeros(
             bsize,
             self.num_action_chunks,
@@ -545,7 +547,11 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                 mean, std = sde_step_params(
                     x_t.float(), v_t.float(), dt, self.flow_sde_noise_level
                 )
-                total_lp += sde_step_logprob_per_dim(x_next, mean, std)
+                total_lp += sde_step_logprob_per_dim(
+                    x_next[..., :action_dim],
+                    mean[..., :action_dim],
+                    std[..., :action_dim],
+                )
         return total_lp
 
     @torch.no_grad()

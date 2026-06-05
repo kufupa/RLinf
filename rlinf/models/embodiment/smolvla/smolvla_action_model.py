@@ -455,10 +455,11 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         dt = -1.0 / float(num_steps)
         bsize = int(state.shape[0])
         action_dim = int(self.policy.config.action_feature.shape[0])
+        model_chunk = int(model.config.chunk_size)
         chunk_len = int(self.num_action_chunks)
         max_action_dim = int(model.config.max_action_dim)
         noise = torch.randn(
-            (bsize, chunk_len, max_action_dim),
+            (bsize, model_chunk, max_action_dim),
             device=device,
             dtype=torch.float32,
         )
@@ -491,7 +492,9 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                 chain_steps.append(x_t.detach().cpu())
                 time = time + dt
         chains = torch.stack(chain_steps, dim=1)
-        final = chains[:, -1, :, :action_dim].to(device=device, dtype=torch.float32)
+        final = chains[:, -1, :chunk_len, :action_dim].to(
+            device=device, dtype=torch.float32
+        )
         denoise_inds = (
             torch.arange(num_steps, device=device, dtype=torch.long)[None]
             .expand(bsize, -1)
@@ -516,10 +519,11 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         dt = -1.0 / float(num_steps)
         bsize = int(chains.shape[0])
         action_dim = int(self.policy.config.action_feature.shape[0])
+        chunk_len = int(self.num_action_chunks)
         total_lp = torch.zeros(
             bsize,
-            self.num_action_chunks,
-            self.action_dim,
+            chunk_len,
+            action_dim,
             device=device,
             dtype=torch.float32,
         )
@@ -548,9 +552,9 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                     x_t.float(), v_t.float(), dt, self.flow_sde_noise_level
                 )
                 total_lp += sde_step_logprob_per_dim(
-                    x_next[..., :action_dim],
-                    mean[..., :action_dim],
-                    std[..., :action_dim],
+                    x_next[:, :chunk_len, :action_dim],
+                    mean[:, :chunk_len, :action_dim],
+                    std[:, :chunk_len, :action_dim],
                 )
         return total_lp
 

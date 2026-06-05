@@ -43,6 +43,22 @@ def to_tensor(value):
     return torch.as_tensor(value)
 
 
+def _load_jepa_wm_bundle(cfg):
+    jepa_repo = str(cfg.get("jepa_repo", "") or "")
+    jepa_ckpt = str(cfg.get("jepa_ckpt", ""))
+    if not jepa_repo or not jepa_ckpt:
+        raise ValueError("wm_latent_progress requires jepa_repo and jepa_ckpt in env cfg")
+    from rlinf.models.embodiment.world_model.jepa_wm import build_jepa_wm_bundle
+
+    return build_jepa_wm_bundle(cfg)
+
+
+def _make_oracle_catalog(cfg, wm_bundle):
+    from rlinf.envs.metaworld.oracle_roots import OracleTeacherForcedCatalog
+
+    return OracleTeacherForcedCatalog(cfg, wm_bundle)
+
+
 class SmolVLAMetaWorldEnv(gym.Env):
     """MetaWorld push-v3 env using SmolVLA's LeRobot image+proprio contract."""
 
@@ -67,6 +83,16 @@ class SmolVLAMetaWorldEnv(gym.Env):
         self.use_rel_reward = bool(self.cfg.get("use_rel_reward", True))
         self.reward_coef = float(self.cfg.get("reward_coef", 1.0))
         self.reward_mode = str(self.cfg.get("reward_mode", "sparse_success_delta"))
+        self.root_mode = str(self.cfg.get("root_mode", "native"))
+        self.group_size = int(self.cfg.get("group_size", 1))
+        self.num_group = max(1, self.num_envs // self.group_size)
+        self.num_action_chunks = int(
+            self.cfg.get("num_action_chunks", self.cfg.get("chunk_len", 5))
+        )
+        self._wm_teacher_forced = (
+            self.reward_mode == "wm_latent_progress"
+            and self.root_mode == "oracle_teacher_forced"
+        )
 
         self._is_start = True
         self._reset_counter = 0
@@ -82,6 +108,19 @@ class SmolVLAMetaWorldEnv(gym.Env):
         self.video_cfg = self.cfg.video_cfg
         self.env = self._make_rollout()
         self.last_obs = None
+        self._wm_bundle = None
+        self._oracle_catalog = None
+        self._oracle_roots: list[Any | None] = [None] * self.num_envs
+        if self.reward_mode == "wm_latent_progress":
+            self._wm_bundle = _load_jepa_wm_bundle(self.cfg)
+        if self.root_mode == "oracle_teacher_forced":
+            if self._wm_bundle is None:
+                raise ValueError(
+                    "root_mode=oracle_teacher_forced requires reward_mode=wm_latent_progress"
+                )
+            self._oracle_catalog = _make_oracle_catalog(self.cfg, self._wm_bundle)
+        if self.group_size > 1 or self._wm_teacher_forced:
+            self.update_reset_state_ids()
 
     @property
     def elapsed_steps(self):
@@ -180,6 +219,8 @@ class SmolVLAMetaWorldEnv(gym.Env):
 
         if reset_state_ids is not None:
             return self.reset_many(reset_state_ids)
+        if self.group_size > 1 or self._wm_teacher_forced:
+            return self.reset_many(self.reset_state_ids)
         return self.reset_many(self._next_reset_seeds(self.num_envs))
 
     def reset_many(self, reset_seeds):
@@ -188,7 +229,33 @@ class SmolVLAMetaWorldEnv(gym.Env):
             raise ValueError(f"reset_many expected {self.num_envs} seeds; got {seeds.shape[0]}")
         self.reset_seeds = seeds
         self.reset_state_ids = seeds.copy()
+        if self._wm_teacher_forced:
+            return self._reset_many_oracle_teacher_forced(seeds)
         raw_obs = self.env.reset_many(seeds)
+        self.last_obs = raw_obs
+        self._reset_metrics()
+        self._terminal_rows[:] = False
+        return self._wrap_obs(raw_obs), {}
+
+    def _reset_many_oracle_teacher_forced(self, seeds: np.ndarray):
+        assert self._oracle_catalog is not None
+        images: list[np.ndarray] = []
+        states: list[np.ndarray] = []
+        root_by_seed: dict[int, Any] = {}
+        for env_idx, seed in enumerate(seeds):
+            seed_int = int(seed)
+            if seed_int not in root_by_seed:
+                root_by_seed[seed_int] = self._oracle_catalog.next_root_for_group(
+                    seed_int
+                )
+            root = root_by_seed[seed_int]
+            self._oracle_roots[env_idx] = root
+            images.append(np.asarray(root.policy_image, dtype=np.uint8))
+            states.append(np.asarray(root.proprio, dtype=np.float32))
+        raw_obs = {
+            "pixels": np.stack(images, axis=0),
+            "agent_pos": np.stack(states, axis=0),
+        }
         self.last_obs = raw_obs
         self._reset_metrics()
         self._terminal_rows[:] = False
@@ -196,7 +263,40 @@ class SmolVLAMetaWorldEnv(gym.Env):
 
     def update_reset_state_ids(self):
         """Compatibility hook for RLinf EnvWorker rollout finalization."""
+        if self.group_size > 1 or self._wm_teacher_forced:
+            group_seeds = self._next_reset_seeds(self.num_group)
+            self.reset_state_ids = np.repeat(group_seeds, self.group_size).astype(
+                np.int64
+            )
+            self.reset_seeds = self.reset_state_ids.copy()
+            return
         self.reset_state_ids = self.reset_seeds.copy()
+
+    def _score_wm_latent_progress(self, chunk_actions: np.ndarray) -> np.ndarray:
+        from rlinf.models.embodiment.world_model.jepa_wm import score_wm_latent_progress
+
+        assert self._wm_bundle is not None
+        rewards = np.zeros(self.num_envs, dtype=np.float32)
+        chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
+        proprio_alpha = float(self.cfg.get("wm_proprio_alpha", 0.1))
+        goal_mode = str(self.cfg.get("goal_latent_mode", "visual_proprio"))
+        for env_idx in range(self.num_envs):
+            root = self._oracle_roots[env_idx]
+            if root is None:
+                raise RuntimeError(
+                    f"missing oracle root for env {env_idx} in wm_latent_progress mode"
+                )
+            rewards[env_idx] = score_wm_latent_progress(
+                self._wm_bundle,
+                image=root.wm_image,
+                proprio=root.proprio,
+                chunk_actions=chunk_actions[env_idx],
+                goal=root.goal_latent,
+                candidate_index=env_idx % self.group_size,
+                proprio_alpha=proprio_alpha,
+                mode=goal_mode,
+            )
+        return self.reward_coef * rewards
 
     def _step_reward(
         self,
@@ -283,6 +383,53 @@ class SmolVLAMetaWorldEnv(gym.Env):
         )
 
     def chunk_step(self, chunk_actions):
+        chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
+        if self.reward_mode == "wm_latent_progress":
+            return self._chunk_step_wm_latent_progress(chunk_actions)
+        return self._chunk_step_sim(chunk_actions)
+
+    def _chunk_step_wm_latent_progress(self, chunk_actions: np.ndarray):
+        chunk_size = int(chunk_actions.shape[1])
+        if chunk_size != self.num_action_chunks:
+            raise ValueError(
+                f"expected chunk size {self.num_action_chunks}, got {chunk_size}"
+            )
+        step_reward = self._score_wm_latent_progress(chunk_actions)
+        obs = self._wrap_obs(self.last_obs)
+        obs_list = [obs for _ in range(chunk_size)]
+        chunk_rewards = torch.zeros(self.num_envs, chunk_size, dtype=torch.float32)
+        chunk_rewards[:, -1] = torch.as_tensor(step_reward, dtype=torch.float32)
+        chunk_terminations = torch.zeros(
+            self.num_envs, chunk_size, dtype=torch.bool
+        )
+        chunk_terminations[:, -1] = True
+        chunk_truncations = torch.zeros_like(chunk_terminations)
+        self._elapsed_steps[:] = 1
+        self._terminal_rows[:] = True
+        infos = self._record_metrics(
+            step_reward,
+            chunk_terminations[:, -1].cpu().numpy(),
+            {},
+        )
+        infos["valid_action_mask"] = torch.ones(
+            self.num_envs, chunk_size, dtype=torch.bool
+        )
+        infos["executed_steps"] = torch.ones(self.num_envs, dtype=torch.long)
+        infos["all_rows_terminal"] = True
+        infos_list = [copy.deepcopy(infos) for _ in range(chunk_size)]
+        if self.auto_reset:
+            obs_list[-1], infos_list[-1] = self._handle_auto_reset(
+                np.ones(self.num_envs, dtype=bool), obs_list[-1], infos_list[-1]
+            )
+        return (
+            obs_list,
+            chunk_rewards,
+            chunk_terminations,
+            chunk_truncations,
+            infos_list,
+        )
+
+    def _chunk_step_sim(self, chunk_actions):
         chunk_actions = np.asarray(chunk_actions, dtype=np.float32)
         chunk_size = chunk_actions.shape[1]
         obs_list = []

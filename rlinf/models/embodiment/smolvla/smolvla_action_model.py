@@ -455,10 +455,10 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         dt = -1.0 / float(num_steps)
         bsize = int(state.shape[0])
         action_dim = int(self.policy.config.action_feature.shape[0])
-        chunk_size = int(model.config.chunk_size)
+        chunk_len = int(self.num_action_chunks)
         max_action_dim = int(model.config.max_action_dim)
         noise = torch.randn(
-            (bsize, chunk_size, max_action_dim),
+            (bsize, chunk_len, max_action_dim),
             device=device,
             dtype=torch.float32,
         )

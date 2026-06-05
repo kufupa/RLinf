@@ -1,0 +1,36 @@
+env_type: smolvla_metaworld
+task_name: push-v3
+task_description: "Push the puck to a goal"
+
+total_num_envs: null
+
+auto_reset: False
+ignore_terminations: False
+max_steps_per_rollout_epoch: 5
+max_episode_steps: 1
+
+reward_mode: wm_latent_progress
+root_mode: oracle_teacher_forced
+use_rel_reward: False
+reward_coef: 1.0
+is_eval: False
+
+seed: 0
+reset_seed_base: 2000
+reset_randomization_mode: random_seeded
+group_size: 8
+num_action_chunks: 5
+use_async_envs: False
+
+goal_latent_mode: visual_proprio
+wm_proprio_alpha: 0.1
+wm_device: cuda
+jepa_repo: "/vol/bitbucket/aa6622/VGG JEPA/jepa-wms"
+jepa_ckpt: "/vol/bitbucket/aa6622/.cache/huggingface/hub/models--facebook--jepa-wms/snapshots/9b9c41ef249466630dbf1a20e78391865d07b3b9/jepa_wm_metaworld.pth.tar"
+oracle_cache_dir: "/vol/bitbucket/aa6622/wm_flowsde_runs/oracle_cache"
+oracle_max_steps: 120
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train

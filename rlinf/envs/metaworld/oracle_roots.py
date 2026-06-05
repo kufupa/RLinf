@@ -141,7 +141,6 @@ class OracleTeacherForcedCatalog:
             OfficialLeRobotMetaWorldGRPORollout,
         )
         from smolvla_grpo.phase12_goals import build_local_transition_schedule
-        from smolvla_grpo.phase12_root_cache import build_oracle_root_entry
         from smolvla_grpo.phase12_wm_reward import _encode_structured
 
         cache_dir = self.cache_root / f"seed_{seed}"
@@ -167,15 +166,6 @@ class OracleTeacherForcedCatalog:
             for transition in transitions:
                 root_idx = min(int(transition.root_frame_1based), len(oracle["frames"]))
                 goal_idx = min(int(transition.goal_frame_1based), len(oracle["frames"]))
-                entry = build_oracle_root_entry(
-                    env_h=oracle_env,
-                    bundle=None,
-                    policy_frame=oracle["frames"][root_idx - 1],
-                    wm_frame=oracle["wm_frames"][root_idx - 1],
-                    raw_obs=oracle["raw_obs"][root_idx - 1],
-                    proprio=oracle["proprios"][root_idx - 1],
-                    frame_index_1based=root_idx,
-                )
                 goal_encoded = _encode_structured(
                     self.wm_bundle,
                     oracle["wm_frames"][goal_idx - 1],
@@ -186,9 +176,15 @@ class OracleTeacherForcedCatalog:
                     OracleRootState(
                         seed=int(seed),
                         frame_index_1based=int(root_idx),
-                        policy_image=entry.policy_image,
-                        wm_image=entry.wm_image,
-                        proprio=entry.proprio,
+                        policy_image=np.asarray(
+                            oracle["frames"][root_idx - 1], dtype=np.uint8
+                        ).copy(),
+                        wm_image=np.asarray(
+                            oracle["wm_frames"][root_idx - 1], dtype=np.uint8
+                        ).copy(),
+                        proprio=np.asarray(
+                            oracle["proprios"][root_idx - 1], dtype=np.float32
+                        ).copy(),
                         goal_latent=goal_encoded,
                     )
                 )

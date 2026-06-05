@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from rlinf.algorithms.flow_sde import sde_step_logprob_per_dim, sde_step_params
 from rlinf.models.embodiment.base_policy import BasePolicy, ForwardType
 from rlinf.models.embodiment.modules.value_head import ValueHead
 
@@ -113,6 +114,9 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         self.action_low = float(cfg.get("action_low", -1.0))
         self.action_high = float(cfg.get("action_high", 1.0))
         self.detach_critic_input = bool(cfg.get("detach_critic_input", True))
+        self.noise_method = str(cfg.get("noise_method", "gaussian"))
+        self.flow_sde_num_steps = int(cfg.get("flow_sde_num_steps", 10))
+        self.flow_sde_noise_level = float(cfg.get("flow_sde_noise_level", 1.0))
         self._bundle = bundle if bundle is not None else self._load_bundle(cfg)
         self.policy = self._bundle.policy
         self.preprocessor = self._bundle.preprocessor
@@ -390,6 +394,160 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                 return param.dtype
         return None
 
+    def _proc_to_flow_batch(self, proc: dict[str, Any], device: torch.device):
+        batch = _to_device(proc, device, dtype=self._floating_param_dtype())
+        if hasattr(self.policy, "_prepare_batch"):
+            batch = self.policy._prepare_batch(batch)
+        images, img_masks = self.policy.prepare_images(batch)
+        state = self.policy.prepare_state(batch)
+        from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
+
+        lang_tokens = batch[OBS_LANGUAGE_TOKENS]
+        lang_masks = batch[OBS_LANGUAGE_ATTENTION_MASK]
+        return images, img_masks, lang_tokens, lang_masks, state
+
+    def _build_smolvla_flow_cache(
+        self, proc: dict[str, Any], device: torch.device
+    ) -> tuple[Any, Any, torch.Tensor]:
+        from lerobot.policies.smolvla.modeling_smolvla import make_att_2d_masks
+
+        images, img_masks, lang_tokens, lang_masks, state = self._proc_to_flow_batch(
+            proc, device
+        )
+        model = self.policy.model
+        param_dtype = self._floating_param_dtype()
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=param_dtype)
+            if device.type == "cuda"
+            and param_dtype in {torch.bfloat16, torch.float16}
+            else nullcontext()
+        )
+        with autocast_context:
+            prefix_embs, prefix_pad_masks, prefix_att_masks = model.embed_prefix(
+                images, img_masks, lang_tokens, lang_masks, state=state
+            )
+            prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+            prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+            _, past_key_values = model.vlm_with_expert.forward(
+                attention_mask=prefix_att_2d_masks,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=model.config.use_cache,
+                fill_kv_cache=True,
+            )
+        return prefix_pad_masks, past_key_values, state
+
+    @torch.no_grad()
+    def _flow_sde_sample(
+        self,
+        proc: dict[str, Any],
+        *,
+        n_envs: int,
+        mode: str,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        device = next(self.parameters()).device
+        prefix_pad_masks, past_key_values, state = self._build_smolvla_flow_cache(
+            proc, device
+        )
+        model = self.policy.model
+        num_steps = int(self.flow_sde_num_steps)
+        dt = -1.0 / float(num_steps)
+        bsize = int(state.shape[0])
+        action_dim = int(self.policy.config.action_feature.shape[0])
+        chunk_size = int(model.config.chunk_size)
+        noise = torch.randn(
+            (bsize, chunk_size, model.config.max_action_dim),
+            device=device,
+            dtype=torch.float32,
+        )
+        x_t = noise
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        chain_steps = [x_t.detach().cpu()]
+        param_dtype = self._floating_param_dtype()
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=param_dtype)
+            if device.type == "cuda"
+            and param_dtype in {torch.bfloat16, torch.float16}
+            else nullcontext()
+        )
+        with autocast_context:
+            while time.item() >= (-dt / 2.0) - 1e-6:
+                expanded_time = time.expand(bsize)
+                v_t = model.denoise_step(
+                    prefix_pad_masks=prefix_pad_masks,
+                    past_key_values=past_key_values,
+                    x_t=x_t,
+                    timestep=expanded_time,
+                )
+                mean, std = sde_step_params(
+                    x_t.float(), v_t.float(), dt, self.flow_sde_noise_level
+                )
+                if mode == "train":
+                    x_t = mean + std * torch.randn_like(mean)
+                else:
+                    x_t = mean
+                chain_steps.append(x_t.detach().cpu())
+                time = time + dt
+        chains = torch.stack(chain_steps, dim=1)[..., :action_dim]
+        final = chains[:, -1].to(device=device, dtype=torch.float32)
+        denoise_inds = (
+            torch.arange(num_steps, device=device, dtype=torch.long)[None]
+            .expand(bsize, -1)
+            .contiguous()
+        )
+        return final, chains, denoise_inds
+
+    def _flow_sde_logprob_from_chains(
+        self,
+        proc: dict[str, Any],
+        chains: torch.Tensor,
+        denoise_inds: torch.Tensor,
+    ) -> torch.Tensor:
+        device = next(self.parameters()).device
+        chains = chains.to(device=device, dtype=torch.float32)
+        denoise_inds = denoise_inds.to(device=device, dtype=torch.long)
+        prefix_pad_masks, past_key_values, state = self._build_smolvla_flow_cache(
+            proc, device
+        )
+        model = self.policy.model
+        num_steps = int(self.flow_sde_num_steps)
+        dt = -1.0 / float(num_steps)
+        bsize = int(chains.shape[0])
+        total_lp = torch.zeros(
+            bsize,
+            self.num_action_chunks,
+            self.action_dim,
+            device=device,
+            dtype=torch.float32,
+        )
+        param_dtype = self._floating_param_dtype()
+        autocast_context = (
+            torch.autocast(device_type="cuda", dtype=param_dtype)
+            if device.type == "cuda"
+            and param_dtype in {torch.bfloat16, torch.float16}
+            else nullcontext()
+        )
+        with autocast_context:
+            for step_idx in range(num_steps):
+                time = torch.tensor(
+                    1.0 + step_idx * dt, dtype=torch.float32, device=device
+                )
+                expanded_time = time.expand(bsize)
+                x_t = chains[:, step_idx]
+                x_next = chains[:, step_idx + 1]
+                v_t = model.denoise_step(
+                    prefix_pad_masks=prefix_pad_masks,
+                    past_key_values=past_key_values,
+                    x_t=x_t,
+                    timestep=expanded_time,
+                )
+                mean, std = sde_step_params(
+                    x_t.float(), v_t.float(), dt, self.flow_sde_noise_level
+                )
+                total_lp += sde_step_logprob_per_dim(x_next, mean, std)
+        return total_lp
+
     @torch.no_grad()
     def predict_action_batch(
         self,
@@ -403,6 +561,29 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         device = next(self.parameters()).device
         proc = _to_device(proc, device, dtype=self._floating_param_dtype())
         batch_size = int(_get_proc_value(proc, self.obs_state_key).shape[0])
+
+        if self.noise_method == "flow_sde":
+            unsquashed, chains, denoise_inds = self._flow_sde_sample(
+                proc, n_envs=batch_size, mode=mode
+            )
+            actions = self._postprocess_actions(unsquashed)
+            prev_logprobs = self._flow_sde_logprob_from_chains(proc, chains, denoise_inds)
+            prev_values = self._values_from_proc(proc, compute_values=compute_values)
+            forward_inputs = _flatten_tensor_tree(proc)
+            forward_inputs["chains"] = chains.detach().cpu().contiguous()
+            forward_inputs["denoise_inds"] = denoise_inds.detach().cpu().contiguous()
+            forward_inputs["smolvla_unsquashed_actions"] = (
+                unsquashed.detach().cpu().contiguous()
+            )
+            forward_inputs["action"] = (
+                actions.detach().reshape(batch_size, -1).cpu().contiguous()
+            )
+            return actions, {
+                "prev_logprobs": prev_logprobs.detach(),
+                "prev_values": prev_values.detach(),
+                "forward_inputs": forward_inputs,
+            }
+
         mean, log_std = self._get_distr_params_chunk_batch(
             proc,
             n_envs=batch_size,
@@ -442,6 +623,27 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
         device = next(self.parameters()).device
         proc = _unflatten_tensor_tree(forward_inputs)
         proc = _to_device(proc, device, dtype=self._floating_param_dtype())
+
+        if self.noise_method == "flow_sde" and "chains" in forward_inputs:
+            chains = forward_inputs["chains"].to(device)
+            denoise_inds = forward_inputs["denoise_inds"].to(device)
+            output_dict: dict[str, Any] = {}
+            if compute_logprobs:
+                output_dict["logprobs"] = self._flow_sde_logprob_from_chains(
+                    proc, chains, denoise_inds
+                )
+            if compute_entropy:
+                output_dict["entropy"] = torch.zeros(
+                    (chains.shape[0], self.num_action_chunks, self.action_dim),
+                    device=device,
+                    dtype=torch.float32,
+                )
+            if compute_values:
+                output_dict["values"] = self._values_from_proc(
+                    proc, compute_values=True
+                )
+            return output_dict
+
         unsquashed = forward_inputs["smolvla_unsquashed_actions"].to(device)
         if unsquashed.ndim == 3:
             n_envs, chunk_len, action_dim = unsquashed.shape

@@ -461,8 +461,15 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
         e_ref = ((pred_ref - target) ** 2 * w).sum(dim=sum_dims).detach()
         delta = e_theta.detach() - e_ref
         per = signed_adv * dpo_beta * delta / float(group_size)
+        flat_per = per.reshape(-1)
+        if flat_per.numel() % group_size != 0:
+            raise ValueError(
+                f"DGPO micro-batch size {flat_per.numel()} is not a multiple of "
+                f"group_size={group_size}; set actor.micro_batch_size to a multiple "
+                f"of algorithm.group_size."
+            )
         gsum = (
-            per.reshape(-1, group_size)
+            flat_per.reshape(-1, group_size)
             .sum(dim=1, keepdim=True)
             .expand(-1, group_size)
             .reshape(-1)

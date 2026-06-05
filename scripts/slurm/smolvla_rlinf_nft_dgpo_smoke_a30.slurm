@@ -51,7 +51,7 @@ nvidia-smi -L || true
   env.eval.total_num_envs=16 \
   env.eval.max_steps_per_rollout_epoch=20 \
   env.eval.max_episode_steps=20 \
-  actor.micro_batch_size=8 \
+  actor.micro_batch_size=16 \
   actor.global_batch_size=16 2>&1 | tee "${RUN_LOG}"
 
 grep -q "runner.run:done" "${RUN_LOG}"

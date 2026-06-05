@@ -53,7 +53,7 @@ nvidia-smi -L || true
   env.eval.total_num_envs=25 \
   env.eval.max_steps_per_rollout_epoch=120 \
   env.eval.max_episode_steps=120 \
-  actor.micro_batch_size=8 \
+  actor.micro_batch_size=16 \
   actor.global_batch_size=32 \
   actor.optim.lr=5.0e-6 2>&1 | tee "${RUN_LOG}"
 

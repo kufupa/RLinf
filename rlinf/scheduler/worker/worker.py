@@ -432,8 +432,9 @@ class Worker(metaclass=WorkerMeta):
 
         # Initialize Ray if not already initialized
         if not ray.is_initialized():
+            ray_address = os.environ.get("RAY_ADDRESS", "auto")
             ray.init(
-                address="auto",
+                address=ray_address,
                 namespace=Cluster.NAMESPACE,
                 logging_level=Cluster.LOGGING_LEVEL,
             )

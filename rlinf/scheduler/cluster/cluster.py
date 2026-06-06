@@ -295,6 +295,12 @@ class Cluster:
         )
 
     @staticmethod
+    def _wait_for_manager_actors(*manager_refs: ActorHandle) -> None:
+        """Block until manager actors finish ``__init__`` and register names."""
+        if manager_refs:
+            ray.get(list(manager_refs))
+
+    @staticmethod
     def _build_ray_init_kwargs(
         ray_cfg: Optional[RayInitConfig],
         runtime_env: Optional[dict[str, Any]],
@@ -472,13 +478,24 @@ class Cluster:
             )
             _stage("manager:device_lock:start")
             self._device_lock_manager = self._launch_manager_actor(
-                DeviceLockManager, manager_node, runtime_env
+                DeviceLockManager,
+                manager_node,
+                runtime_env,
+                self.num_accelerators,
             )
             _stage("manager:port_lock:start")
             self._port_lock_manager = self._launch_manager_actor(
                 PortLockManager, manager_node, runtime_env
             )
             _stage("manager:all:launched")
+            Cluster._wait_for_manager_actors(
+                self._worker_manager,
+                self._coll_manager,
+                self._node_manager,
+                self._device_lock_manager,
+                self._port_lock_manager,
+            )
+            _stage("manager:all:ready")
         except ValueError:
             raise Cluster.NamespaceConflictError
 

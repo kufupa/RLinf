@@ -489,13 +489,22 @@ class Cluster:
             if self._distributed_log_collector is not None:
                 self._distributed_log_collector.stop()
 
+            alive_actors = []
             with without_http_proxies():
-                alive_actors = list_actors(
-                    filters=[
-                        ("STATE", "=", "ALIVE"),
-                        ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
-                    ]
-                )
+                try:
+                    alive_actors = list_actors(
+                        filters=[
+                            ("STATE", "=", "ALIVE"),
+                            ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
+                        ]
+                    )
+                except Exception as exc:
+                    # include_dashboard=false (Slurm default) — state API on :8265 unavailable.
+                    print(
+                        f"Warning: list_actors failed ({exc!r}); "
+                        "skipping per-actor kill before ray.shutdown().",
+                        flush=True,
+                    )
             for actor_state in alive_actors:
                 actor = ray.get_actor(actor_state.name)
                 ray.kill(actor, no_restart=True)

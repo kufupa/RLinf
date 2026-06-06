@@ -650,6 +650,7 @@ class SmolVLAForRLActionPrediction(nn.Module, BasePolicy):
                     device=device,
                     dtype=torch.float32,
                 )
+                # ODE/NFT path: logprobs unused by NFT/DGPO loss (GRPO adv from rewards only).
             prev_values = self._values_from_proc(proc, compute_values=compute_values)
             forward_inputs = _flatten_tensor_tree(proc)
             if self.noise_method == "flow_sde":

@@ -66,6 +66,9 @@ algorithm:
   nft_xcur_source: "resample"
   nft_tau: 1.0
   nft_sum_type: chunk_level
+  dgpo_weight_precompute: true
+  dgpo_apply_loss_mask_to_group_weights: false
+  dgpo_clip_signed_adv: false
   recompute_v: False
 
   sampling_params:
@@ -121,6 +124,8 @@ actor:
   training_backend: "fsdp"
   micro_batch_size: 16
   global_batch_size: 32
+  # Chunk SmolVLA NFT forward when actor.micro_batch_size > this (VRAM).
+  nft_forward_micro_batch_size: 16
   seed: 42
   enable_offload: False
   model:

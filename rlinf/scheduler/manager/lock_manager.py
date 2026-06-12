@@ -17,7 +17,6 @@ import collections
 import threading
 import time
 
-from ..cluster import Cluster
 from .manager import Manager
 from .worker_manager import WorkerAddress
 
@@ -93,11 +92,21 @@ class DeviceLockManager(Manager):
 
     MANAGER_NAME = "DeviceLockManager"
 
-    def __init__(self):
-        """Initialize the lock manager."""
-        cluster = Cluster()
+    def __init__(self, num_accelerators: int):
+        """Initialize the lock manager.
+
+        Args:
+            num_accelerators: Global accelerator count for the cluster. Passed
+                explicitly by the driver so this manager never bootstraps
+                ``Cluster()`` during actor init (avoids a startup race with
+                ``NodeManager`` registration).
+        """
+        if num_accelerators < 0:
+            raise ValueError(
+                f"num_accelerators must be non-negative, got {num_accelerators}."
+            )
         self._device_locks = [
-            WorkerDeviceLock() for _ in range(cluster.num_accelerators)
+            WorkerDeviceLock() for _ in range(num_accelerators)
         ]
 
     async def acquire_devices(

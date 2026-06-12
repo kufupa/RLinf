@@ -1,0 +1,53 @@
+#!/bin/bash
+#PBS -N smolvla-eval-seeds
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=16:mem=96gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -o logs/pbs/smolvla-eval-seeds.out
+
+set -euo pipefail
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+RUN_ID="${PBS_JOBID:-local}"
+OUT_ROOT="${RLINF_RESULTS_DIR}/smolvla_eval_per_seed_${RUN_ID}"
+RUN_LOG="logs/pbs/smolvla-eval-seeds-${RUN_ID}.driver.log"
+
+: "${S2_SPARSE:?Set S2_SPARSE to stage2 sparse checkpoints dir}"
+: "${S2_DENSE:?Set S2_DENSE to stage2 dense checkpoints dir}"
+: "${S3B:?Set S3B to stage3b checkpoints dir}"
+
+{
+  echo "per_seed_rerun: stage2_sparse"
+  "${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+    --run-name "per_seed_stage2_sparse_${RUN_ID}" \
+    --checkpoint-dir "${S2_SPARSE}" \
+    --output-dir "${OUT_ROOT}/stage2_sparse" \
+    --num-envs 25 \
+    --seed-base 50000 \
+    --include-baseline \
+    --only-updates "0,1,5,10,25"
+
+  echo "per_seed_rerun: stage2_dense"
+  "${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+    --run-name "per_seed_stage2_dense_${RUN_ID}" \
+    --checkpoint-dir "${S2_DENSE}" \
+    --output-dir "${OUT_ROOT}/stage2_dense" \
+    --num-envs 25 \
+    --seed-base 50000 \
+    --include-baseline \
+    --only-updates "0,1,5,10,25"
+
+  echo "per_seed_rerun: stage3b_sparse"
+  "${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+    --run-name "per_seed_stage3b_sparse_${RUN_ID}" \
+    --checkpoint-dir "${S3B}" \
+    --output-dir "${OUT_ROOT}/stage3b_sparse" \
+    --num-envs 25 \
+    --seed-base 50000 \
+    --include-baseline \
+    --only-updates "0,10,25,50"
+} 2>&1 | tee "${RUN_LOG}"

@@ -33,7 +33,7 @@ from ray._private import ray_logging
 from ray.actor import ActorHandle
 from ray.util.state import list_actors
 
-from .config import ClusterConfig, NsightConfig
+from .config import ClusterConfig, NsightConfig, RayInitConfig
 from .node import NodeGroupInfo, NodeInfo, NodeProbe
 from .utils import DistributedRayLogCollector, without_http_proxies
 
@@ -41,6 +41,12 @@ ray_version = version("ray")
 assert vs.parse(ray_version) >= vs.parse("2.47.0"), (
     "Ray version 2.47.0 or higher is required. Run pip install ray[default]==2.47.0"
 )
+
+
+def _stage(message: str) -> None:
+    if os.environ.get("RLINF_STAGE_DIAG", "0") == "1":
+        print(f"[rlinf-cluster {time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
 
 if TYPE_CHECKING:
     from ..manager import Manager
@@ -270,6 +276,36 @@ class Cluster:
             .remote(*args)
         )
 
+    @staticmethod
+    def _wait_for_manager_actors(*manager_refs: ActorHandle) -> None:
+        """Block until manager actors finish ``__init__`` and register names."""
+        if manager_refs:
+            ray.get(list(manager_refs))
+
+    @staticmethod
+    def _build_ray_init_kwargs(
+        ray_cfg: Optional[RayInitConfig],
+        runtime_env: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ray_cfg = ray_cfg or RayInitConfig()
+        kwargs: dict[str, Any] = {
+            "logging_level": Cluster.LOGGING_LEVEL,
+            "namespace": Cluster.NAMESPACE,
+        }
+        if ray_cfg.address is not None:
+            kwargs["address"] = ray_cfg.address
+        if runtime_env is not None:
+            kwargs["runtime_env"] = runtime_env
+        if ray_cfg.temp_dir is not None:
+            kwargs["_temp_dir"] = ray_cfg.temp_dir
+        if ray_cfg.include_dashboard is not None:
+            kwargs["include_dashboard"] = ray_cfg.include_dashboard
+        if ray_cfg.num_cpus is not None:
+            kwargs["num_cpus"] = ray_cfg.num_cpus
+        if ray_cfg.object_store_memory is not None:
+            kwargs["object_store_memory"] = ray_cfg.object_store_memory
+        return kwargs
+
     def _init_and_launch_managers(
         self,
         num_nodes: int,
@@ -319,32 +355,39 @@ class Cluster:
             Cluster._prepare_ray_code_sync_runtime_env_fragment()
         )
 
+        ray_runtime_env = (
+            dict(self._ray_code_sync_fragment)
+            if self._ray_code_sync_fragment is not None
+            else None
+        )
+        if ray_runtime_env is not None:
+            py_mods = ray_runtime_env.get("py_modules") or ()
+            self._logger.info(
+                "%s Ray code sync is enabled (py_modules=%r); workers receive "
+                "only the rlinf package from the launch node. Disable with %s=0.",
+                Cluster.SYS_NAME,
+                tuple(py_mods),
+                Cluster.get_full_env_var_name(ClusterEnvVar.CODE_WORKING_DIR),
+            )
+
+        ray_init_kwargs = Cluster._build_ray_init_kwargs(
+            self._cluster_cfg.ray if self._cluster_cfg else None,
+            runtime_env=ray_runtime_env,
+        )
+        _stage(f"ray.init:start kwargs={sorted(ray_init_kwargs.keys())}")
         try:
-            # First try to connect to an existing Ray cluster
-            ray_init_kwargs: dict[str, Any] = {
-                "address": "auto",
-                "logging_level": Cluster.LOGGING_LEVEL,
-                "namespace": Cluster.NAMESPACE,
-            }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
-                py_mods = ray_init_kwargs["runtime_env"].get("py_modules") or ()
-                self._logger.info(
-                    "%s Ray code sync is enabled (py_modules=%r); workers receive "
-                    "only the rlinf package from the launch node. Disable with %s=0.",
-                    Cluster.SYS_NAME,
-                    tuple(py_mods),
-                    Cluster.get_full_env_var_name(ClusterEnvVar.CODE_WORKING_DIR),
-                )
             ray.init(**ray_init_kwargs)
         except ConnectionError:
-            ray_init_kwargs = {
+            if ray_init_kwargs.get("address") != "auto":
+                raise
+            fallback_kwargs: dict[str, Any] = {
                 "logging_level": Cluster.LOGGING_LEVEL,
                 "namespace": Cluster.NAMESPACE,
             }
-            if self._ray_code_sync_fragment is not None:
-                ray_init_kwargs["runtime_env"] = dict(self._ray_code_sync_fragment)
-            ray.init(**ray_init_kwargs)
+            if ray_runtime_env is not None:
+                fallback_kwargs["runtime_env"] = ray_runtime_env
+            ray.init(**fallback_kwargs)
+        _stage("ray.init:done")
 
         # Ray log collector
         if distributed_log_dir is not None:
@@ -367,7 +410,9 @@ class Cluster:
             time.sleep(1)
 
         # Get node info
+        _stage("node_probe:start")
         self._node_probe = NodeProbe(self._num_nodes, self._cluster_cfg)
+        _stage("node_probe:done")
         self._nodes = self._node_probe.nodes
         self._node_groups = self._node_probe.node_groups
 
@@ -396,12 +441,15 @@ class Cluster:
         try:
             runtime_env = {"env_vars": Manager.get_runtime_env_vars()}
             manager_node = self._get_manager_node(self._nodes)
+            _stage("manager:worker:start")
             self._worker_manager = self._launch_manager_actor(
                 WorkerManager, manager_node, runtime_env
             )
+            _stage("manager:collective:start")
             self._coll_manager = self._launch_manager_actor(
                 CollectiveManager, manager_node, runtime_env
             )
+            _stage("manager:node:start")
             self._node_manager = self._launch_manager_actor(
                 NodeManager,
                 manager_node,
@@ -410,12 +458,26 @@ class Cluster:
                 self._node_groups,
                 self._cluster_cfg,
             )
+            _stage("manager:device_lock:start")
             self._device_lock_manager = self._launch_manager_actor(
-                DeviceLockManager, manager_node, runtime_env
+                DeviceLockManager,
+                manager_node,
+                runtime_env,
+                self.num_accelerators,
             )
+            _stage("manager:port_lock:start")
             self._port_lock_manager = self._launch_manager_actor(
                 PortLockManager, manager_node, runtime_env
             )
+            _stage("manager:all:launched")
+            Cluster._wait_for_manager_actors(
+                self._worker_manager,
+                self._coll_manager,
+                self._node_manager,
+                self._device_lock_manager,
+                self._port_lock_manager,
+            )
+            _stage("manager:all:ready")
         except ValueError:
             raise Cluster.NamespaceConflictError
 
@@ -426,13 +488,22 @@ class Cluster:
             if self._distributed_log_collector is not None:
                 self._distributed_log_collector.stop()
 
+            alive_actors = []
             with without_http_proxies():
-                alive_actors = list_actors(
-                    filters=[
-                        ("STATE", "=", "ALIVE"),
-                        ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
-                    ]
-                )
+                try:
+                    alive_actors = list_actors(
+                        filters=[
+                            ("STATE", "=", "ALIVE"),
+                            ("RAY_NAMESPACE", "=", Cluster.NAMESPACE),
+                        ]
+                    )
+                except Exception as exc:
+                    # include_dashboard=false (Slurm default) — state API on :8265 unavailable.
+                    print(
+                        f"Warning: list_actors failed ({exc!r}); "
+                        "skipping per-actor kill before ray.shutdown().",
+                        flush=True,
+                    )
             for actor_state in alive_actors:
                 actor = ray.get_actor(actor_state.name)
                 ray.kill(actor, no_restart=True)

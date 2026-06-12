@@ -21,3 +21,12 @@ rlinf/envs/maniskill/assets
 PKG-INFO
 *.egg-info/
 .claude/settings.json
+
+# local run artifacts and scratch (keep feature commits surgical)
+/artifacts/
+/imperial_latex/
+/research_log.md
+/.cursor/
+/wandb/
+/results/
+*.err

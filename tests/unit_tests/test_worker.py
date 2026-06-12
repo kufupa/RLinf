@@ -26,6 +26,7 @@ from rlinf.scheduler import (
     WorkerAddress,
 )
 from rlinf.scheduler.manager.coll_manager import CollectiveManager
+from rlinf.scheduler.manager.lock_manager import DeviceLockManager
 from rlinf.scheduler.manager.manager import Manager
 
 
@@ -126,6 +127,18 @@ class TestManagerNamespace:
             ):
                 CollectiveManager()
                 assert Cluster.NAMESPACE == "env-namespace"
+
+
+class TestDeviceLockManager:
+    """Tests for DeviceLockManager initialization."""
+
+    def test_device_lock_manager_uses_explicit_accelerator_count(self):
+        manager = DeviceLockManager(num_accelerators=3)
+        assert len(manager._device_locks) == 3
+
+    def test_device_lock_manager_rejects_negative_accelerator_count(self):
+        with pytest.raises(ValueError, match="num_accelerators must be non-negative"):
+            DeviceLockManager(num_accelerators=-1)
 
 
 class TestWorkerGroup:

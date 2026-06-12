@@ -1,0 +1,38 @@
+#!/bin/bash
+#PBS -N smolvla-eval-sweep
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=16:mem=96gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -o logs/pbs/smolvla-eval-sweep.out
+
+set -euo pipefail
+
+: "${SMOLVLA_EVAL_RUN_NAME:?Set SMOLVLA_EVAL_RUN_NAME}"
+: "${SMOLVLA_EVAL_CKPT_DIR:?Set SMOLVLA_EVAL_CKPT_DIR}"
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+RUN_ID="${PBS_JOBID:-local}"
+RUN_DIR="${RLINF_RESULTS_DIR}/smolvla_eval_${SMOLVLA_EVAL_RUN_NAME}_${RUN_ID}"
+RUN_LOG="logs/pbs/smolvla-eval-${SMOLVLA_EVAL_RUN_NAME}-${RUN_ID}.driver.log"
+
+EXTRA_ARGS=()
+if [[ -n "${SMOLVLA_EVAL_INCLUDE_BASELINE:-}" ]]; then
+  EXTRA_ARGS+=(--include-baseline)
+fi
+if [[ -n "${SMOLVLA_EVAL_ONLY_UPDATES:-}" ]]; then
+  EXTRA_ARGS+=(--only-updates "${SMOLVLA_EVAL_ONLY_UPDATES}")
+fi
+
+"${PYTHON_BIN}" scripts/eval_smolvla_metaworld_ckpt_sweep.py \
+  --run-name "${SMOLVLA_EVAL_RUN_NAME}_${RUN_ID}" \
+  --checkpoint-dir "${SMOLVLA_EVAL_CKPT_DIR}" \
+  --output-dir "${RUN_DIR}" \
+  --num-envs "${SMOLVLA_EVAL_NUM_ENVS:-25}" \
+  --seed-base "${SMOLVLA_EVAL_SEED_BASE:-50000}" \
+  --checkpoint-stride "${SMOLVLA_EVAL_CKPT_STRIDE:-1}" \
+  --max-checkpoints "${SMOLVLA_EVAL_MAX_CKPTS:-0}" \
+  "${EXTRA_ARGS[@]}" 2>&1 | tee "${RUN_LOG}"

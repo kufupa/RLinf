@@ -1,0 +1,48 @@
+#!/bin/bash
+#PBS -N native-mw-egl
+#PBS -q v1_gpu72
+#PBS -l select=1:ncpus=4:mem=48gb:ngpus=1:gpu_type=RTX6000:Qlist=v1_gpu72
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -o logs/pbs/native-metaworld-egl-microbench.out
+
+set -euo pipefail
+
+# shellcheck source=scripts/pbs/smolvla_metaworld_common.sh
+source "${RLINF_ROOT:-/rds/general/user/aa6622/home/project/RLinf}/scripts/pbs/smolvla_metaworld_common.sh"
+setup_smolvla_metaworld_env
+
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export LIBGL_ALWAYS_SOFTWARE=0
+export MUJOCO_EGL_DEVICE_ID=0
+
+RUN_ID="${PBS_JOBID:-local}"
+RUN_LOG="logs/pbs/native-metaworld-egl-microbench-${RUN_ID}.driver.log"
+
+"${PYTHON_BIN}" examples/embodiment/train_embodied_agent.py \
+  --config-path "${EMBODIED_PATH}/config/" \
+  --config-name metaworld_pushv3_native_ppo_smolvla \
+  cluster.ray.address=local \
+  cluster.ray.temp_dir="${RAY_TMPDIR}" \
+  cluster.ray.include_dashboard=false \
+  cluster.ray.num_cpus=4 \
+  cluster.ray.object_store_memory=2000000000 \
+  runner.logger.log_path="${RLINF_RESULTS_DIR}/native_metaworld_egl_microbench_${RUN_ID}" \
+  runner.logger.experiment_name="native_metaworld_pushv3_egl_microbench" \
+  runner.logger.logger_backends=[] \
+  runner.max_epochs=10 \
+  runner.save_interval=5 \
+  algorithm.rollout_epoch=2 \
+  algorithm.update_epoch=1 \
+  env.train.total_num_envs=4 \
+  env.train.max_steps_per_rollout_epoch=120 \
+  env.train.max_episode_steps=120 \
+  env.eval.total_num_envs=4 \
+  env.eval.max_steps_per_rollout_epoch=120 \
+  env.eval.max_episode_steps=120 \
+  actor.micro_batch_size=2 \
+  actor.global_batch_size=8 \
+  actor.optim.lr=1.0e-5 \
+  actor.optim.value_lr=1.0e-4 \
+  actor.optim.clip_grad=1.0 2>&1 | tee "${RUN_LOG}"

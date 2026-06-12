@@ -25,6 +25,12 @@ from rlinf.utils.distributed import all_reduce_dict
 from rlinf.utils.metric_utils import append_to_dict
 from rlinf.utils.nested_dict_process import put_tensor_device, split_dict_to_chunk
 from rlinf.utils.utils import clear_memory, masked_mean
+from rlinf.workers.actor.dgpo_group_utils import (
+    build_dgpo_group_block_shuffle_id,
+    build_dgpo_group_ids,
+    compute_dgpo_group_weights,
+    dgpo_mean_dsm_energy,
+)
 from rlinf.workers.actor.fsdp_actor_worker import (
     EmbodiedFSDPActor,
     process_nested_dict_for_train,
@@ -88,6 +94,22 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
             return self.rollout_model_state_dict
         return super().get_rollout_state_dict()
 
+    def _uses_dgpo_loss(self) -> bool:
+        return self.cfg.algorithm.get("nft_loss_form", "dpo") == "dgpo"
+
+    def _process_received_rollout_batch(
+        self, rollout_batch: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        rollout_batch = super()._process_received_rollout_batch(rollout_batch)
+        if not self._uses_dgpo_loss():
+            return rollout_batch
+        group_size = int(self.cfg.algorithm.get("group_size", 16))
+        n_chunk, batch_size = rollout_batch["rewards"].shape[:2]
+        rollout_batch["dgpo_group_id"] = build_dgpo_group_ids(
+            n_chunk, batch_size, group_size
+        )
+        return rollout_batch
+
     def soft_update_rollout_model(self) -> None:
         """Soft update rollout model: state = (1-tau)*state + tau*current. No-op when tau=1."""
         # TODO: potential bug on model state dict transfer, need to check
@@ -127,7 +149,24 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
         )
         g = torch.Generator()
         g.manual_seed(self.cfg.actor.seed + self._rank)
-        shuffle_id = torch.randperm(rollout_size, generator=g)
+        is_dgpo = self._uses_dgpo_loss()
+        if is_dgpo:
+            if self._world_size > 1:
+                raise RuntimeError(
+                    "DGPO NFT training requires world_size=1 until distributed "
+                    "group all_reduce is implemented."
+                )
+            group_size = int(self.cfg.algorithm.get("group_size", 16))
+            if rollout_size % group_size != 0:
+                raise ValueError(
+                    f"DGPO rollout_size={rollout_size} must be divisible by "
+                    f"group_size={group_size}"
+                )
+            shuffle_id = build_dgpo_group_block_shuffle_id(
+                rollout_size, group_size, g
+            )
+        else:
+            shuffle_id = torch.randperm(rollout_size, generator=g)
 
         with torch.no_grad():
             self.rollout_batch = process_nested_dict_for_train(
@@ -169,6 +208,17 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
                 assert train_global_batch_size % self.cfg.actor.micro_batch_size == 0, (
                     f"{train_global_batch_size=}, {self.cfg.actor.micro_batch_size}"
                 )
+
+                if is_dgpo and self.cfg.algorithm.get("dgpo_weight_precompute", True):
+                    train_global_batch = put_tensor_device(
+                        train_global_batch,
+                        f"{Worker.torch_device_type}:{int(os.environ['LOCAL_RANK'])}",
+                    )
+                    dgpo_weights, dgpo_weight_metrics = (
+                        self._precompute_dgpo_group_weights(train_global_batch)
+                    )
+                    train_global_batch["dgpo_weight"] = dgpo_weights
+                    append_to_dict(metrics, dgpo_weight_metrics)
 
                 train_micro_batch = split_dict_to_chunk(
                     train_global_batch,
@@ -248,6 +298,101 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
             )
             forward_inputs["nft_v"] = self._recompute_v_old(forward_inputs, xcur, t)
 
+    def _preprocess_dgpo_signed_adv(self, signed_adv: torch.Tensor) -> torch.Tensor:
+        """Optional signed-advantage clip for DGPO (official clamps before group pref)."""
+        if not self.cfg.algorithm.get("dgpo_clip_signed_adv", False):
+            return signed_adv
+        adv_type = self.cfg.algorithm.get("adv_type", "raw")
+        if adv_type == "raw":
+            return signed_adv
+        adv_clip_max = float(self.cfg.algorithm.get("adv_clip_max", 1.0))
+        return signed_adv.clamp(-adv_clip_max, adv_clip_max)
+
+    def _dgpo_group_weight_loss_mask(
+        self, loss_mask: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        if not self.cfg.algorithm.get("dgpo_apply_loss_mask_to_group_weights", False):
+            return None
+        return loss_mask
+
+    def _precompute_dgpo_group_weights(
+        self, batch: dict
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        """No-grad pass over a global batch to build detached DGPO group weights."""
+        with torch.no_grad():
+            energies = self._dgpo_forward_energies(batch)
+        dpo_beta = float(self.cfg.algorithm.get("dpo_beta", 10.0))
+        group_size = int(self.cfg.algorithm.get("group_size", 16))
+        delta = energies["e_theta"] - energies["e_ref"]
+        return compute_dgpo_group_weights(
+            signed_adv=energies["signed_adv"],
+            delta=delta,
+            group_ids=energies["dgpo_group_id"],
+            dpo_beta=dpo_beta,
+            group_size=group_size,
+            verify=True,
+            loss_mask=self._dgpo_group_weight_loss_mask(energies.get("loss_mask")),
+        )
+
+    def _dgpo_forward_energies(self, batch: dict) -> dict[str, torch.Tensor]:
+        """Forward NFT energies for DGPO weighting (no grad)."""
+        forward_inputs = batch["forward_inputs"]
+        target_space = self.cfg.algorithm.get("nft_target_space", "xnext")
+        x_t_input = forward_inputs["nft_xcur"]
+        step_indices = forward_inputs["nft_step_index"]
+        sum_type = self.cfg.algorithm.get("nft_sum_type", "chunk_level")
+        schedule, t = self._build_schedule_and_timesteps(
+            step_indices, x_t_input.device, x_t_input.dtype
+        )
+        with torch.no_grad():
+            v_theta_full = self._run_nft_forward_v_theta(forward_inputs, x_t_input, t)
+        chunk = v_theta_full.shape[1]
+        v_theta = v_theta_full[:, :chunk, :]
+        x_t = forward_inputs["nft_xcur"][:, :chunk, :]
+        v_old = forward_inputs["nft_v"][:, :chunk, :].detach()
+        batch_size, chunk_len = x_t.shape[:2]
+        if sum_type == "action_level":
+            sum_dims = tuple(range(2, x_t.ndim))
+            loss_mask = batch["loss_mask"].expand(batch_size, chunk_len)
+            signed_adv = batch["advantages"].expand(batch_size, chunk_len)
+        elif sum_type == "chunk_level":
+            sum_dims = tuple(range(1, x_t.ndim))
+            loss_mask = batch["loss_mask"].reshape(batch_size, -1)[:, 0]
+            signed_adv = batch["advantages"].reshape(batch_size, -1)[:, 0]
+        else:
+            raise ValueError(f"Unsupported nft_sum_type: {sum_type}")
+        signed_adv = self._preprocess_dgpo_signed_adv(signed_adv)
+        t_bc, dt_bc, sigma_i, std_t_det = self._build_schedule_params(
+            schedule, step_indices, forward_inputs["nft_noise_level"], x_t
+        )
+        weight_mode = self.cfg.algorithm.get("nft_weight_mode", "auto")
+        target, pred_theta = self._compute_nft_target_and_pred(
+            forward_inputs, target_space, x_t, v_theta, t_bc, dt_bc, sigma_i
+        )
+        _, pred_ref = self._compute_nft_target_and_pred(
+            forward_inputs, target_space, x_t, v_old, t_bc, dt_bc, sigma_i
+        )
+        w = self._compute_nft_weight(
+            weight_mode,
+            t_bc,
+            std_t_det,
+            forward_inputs["nft_noise_level"],
+            target,
+            sum_dims,
+            pred=pred_theta,
+            sample_type="pos",
+        )
+        e_theta = dgpo_mean_dsm_energy((pred_theta - target) ** 2 * w)
+        e_ref = dgpo_mean_dsm_energy((pred_ref - target) ** 2 * w)
+        dgpo_group_id = batch["dgpo_group_id"].reshape(batch_size, -1)[:, 0]
+        return {
+            "e_theta": e_theta,
+            "e_ref": e_ref,
+            "signed_adv": signed_adv,
+            "loss_mask": loss_mask,
+            "dgpo_group_id": dgpo_group_id,
+        }
+
     def _recompute_v_old(
         self,
         forward_inputs: dict,
@@ -255,7 +400,7 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
         t: torch.Tensor,
     ) -> torch.Tensor:
         """Recompute the old velocity with the rollout model."""
-        micro_bs = self.cfg.actor.micro_batch_size
+        micro_bs = self._get_nft_forward_micro_batch_size(xcur.shape[0])
         v_old_buffer = []
         training_was_on_device = False
         cleanup_rollout_model = False
@@ -308,49 +453,102 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
     # NFT Forward & Loss
     # =======================================================================
 
+    def _get_nft_forward_micro_batch_size(self, batch_size: int) -> int:
+        """Cap NFT forward batch size to limit peak VRAM (attention is batch-linear)."""
+        configured = self.cfg.actor.get("nft_forward_micro_batch_size", None)
+        if configured is not None:
+            micro_bs = int(configured)
+        else:
+            train_micro = int(self.cfg.actor.micro_batch_size)
+            # Default: halve large training micro-batches (e.g. M2 group_size=32).
+            micro_bs = min(train_micro, 16) if train_micro > 16 else train_micro
+        return max(1, min(micro_bs, batch_size))
+
+    def _run_nft_forward_v_theta(
+        self,
+        forward_inputs: dict,
+        x_t_input: torch.Tensor,
+        t: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run SmolVLA NFT forward, chunking along batch to avoid A30 OOM."""
+        batch_size = x_t_input.shape[0]
+        micro_bs = self._get_nft_forward_micro_batch_size(batch_size)
+        v_parts: list[torch.Tensor] = []
+        for start in range(0, batch_size, micro_bs):
+            end = min(start + micro_bs, batch_size)
+            fi_slice = put_tensor_device(
+                self._slice_forward_inputs(forward_inputs, start, end),
+                self.device,
+            )
+            with self.amp_context:
+                out = self.model(
+                    forward_type=ForwardType.NFT,
+                    forward_inputs=fi_slice,
+                    nft_inputs={
+                        "x_t": x_t_input[start:end].to(self.device),
+                        "timesteps": t[start:end].to(self.device),
+                    },
+                    compute_values=False,
+                )
+            v_parts.append(out["v_theta"])
+            if end < batch_size and str(self.device).startswith("cuda"):
+                clear_memory()
+        return v_parts[0] if len(v_parts) == 1 else torch.cat(v_parts, dim=0)
+
     def nft_forward_and_loss(self, batch):
         """NFT-specific forward and loss computation."""
         # prepare inputs
         forward_inputs = batch["forward_inputs"]
         target_space = self.cfg.algorithm.get("nft_target_space", "xnext")
+        loss_form = self.cfg.algorithm.get("nft_loss_form", "dpo")
         x_t_input = forward_inputs["nft_xcur"]
         step_indices = forward_inputs["nft_step_index"]
         sum_type = self.cfg.algorithm.get("nft_sum_type", "action_level")
         schedule, t = self._build_schedule_and_timesteps(
             step_indices, x_t_input.device, x_t_input.dtype
         )
-        # forward pass
-        with self.amp_context:
-            output_dict = self.model(
-                forward_type=ForwardType.NFT,
-                forward_inputs=forward_inputs,
-                nft_inputs={"x_t": x_t_input, "timesteps": t},
-                compute_values=False,
-            )
+        v_theta_full = self._run_nft_forward_v_theta(forward_inputs, x_t_input, t)
         # post-process outputs
-        chunk = output_dict["v_theta"].shape[1]
-        v_theta = output_dict["v_theta"][:, :chunk, :]
+        chunk = v_theta_full.shape[1]
+        v_theta = v_theta_full[:, :chunk, :]
         x_t = forward_inputs["nft_xcur"][:, :chunk, :]
         v_old = forward_inputs["nft_v"][:, :chunk, :].detach()
         batch_size, chunk_len = x_t.shape[:2]
         if sum_type == "action_level":
             sum_dims = tuple(range(2, x_t.ndim))
             loss_mask = batch["loss_mask"].expand(batch_size, chunk_len)
-            advantages = batch["advantages"].expand(batch_size, chunk_len)
+            signed_adv = batch["advantages"].expand(batch_size, chunk_len)
         elif sum_type == "chunk_level":
             sum_dims = tuple(range(1, x_t.ndim))
             loss_mask = batch["loss_mask"].reshape(batch_size, -1)[:, 0]
-            advantages = batch["advantages"].reshape(batch_size, -1)[:, 0]
+            signed_adv = batch["advantages"].reshape(batch_size, -1)[:, 0]
         else:
             raise ValueError(f"Unsupported nft_sum_type: {sum_type}")
-        advantages = self._postprocess_advantages(advantages)
+        t_bc, dt_bc, sigma_i, std_t_det = self._build_schedule_params(
+            schedule, step_indices, forward_inputs["nft_noise_level"], x_t
+        )
+        if loss_form == "dgpo":
+            signed_adv = self._preprocess_dgpo_signed_adv(signed_adv)
+            return self._compute_dgpo_nft_loss(
+                forward_inputs=forward_inputs,
+                target_space=target_space,
+                x_t=x_t,
+                v_theta=v_theta,
+                v_old=v_old,
+                signed_adv=signed_adv,
+                loss_mask=loss_mask,
+                sum_dims=sum_dims,
+                t_bc=t_bc,
+                dt_bc=dt_bc,
+                sigma_i=sigma_i,
+                std_t_det=std_t_det,
+                dgpo_group_id=batch.get("dgpo_group_id"),
+                precomputed_weight=batch.get("dgpo_weight"),
+            )
+        advantages = self._postprocess_advantages(signed_adv)
         # clip delta v and get pos/neg candidates
         delta_v, clip_coef, v_pos, v_neg = self._compute_clipped_delta_v(
             v_theta, v_old, sum_dims
-        )
-        # build schedule params
-        t_bc, dt_bc, sigma_i, std_t_det = self._build_schedule_params(
-            schedule, step_indices, forward_inputs["nft_noise_level"], x_t
         )
         # compute target and predictions
         target, pred_pos = self._compute_nft_target_and_pred(
@@ -403,6 +601,88 @@ class EmbodiedNFTFSDPPolicy(EmbodiedFSDPActor):
                     e_neg, (advantages < 0.5) & loss_mask.bool()
                 ).item(),
                 "actor/delta_E_mean": delta_e.mean().item(),
+            }
+        return loss, metrics_data
+
+    def _compute_dgpo_nft_loss(
+        self,
+        *,
+        forward_inputs: dict,
+        target_space: str,
+        x_t: torch.Tensor,
+        v_theta: torch.Tensor,
+        v_old: torch.Tensor,
+        signed_adv: torch.Tensor,
+        loss_mask: torch.Tensor,
+        sum_dims: tuple[int, ...],
+        t_bc: torch.Tensor,
+        dt_bc: torch.Tensor,
+        sigma_i: torch.Tensor,
+        std_t_det: torch.Tensor,
+        dgpo_group_id: torch.Tensor | None = None,
+        precomputed_weight: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict]:
+        """Group-level DGPO loss over plain current-vs-reference CFM energies."""
+        dpo_beta = float(self.cfg.algorithm.get("dpo_beta", 10.0))
+        group_size = int(self.cfg.algorithm.get("group_size", 16))
+        weight_mode = self.cfg.algorithm.get("nft_weight_mode", "auto")
+        target, pred_theta = self._compute_nft_target_and_pred(
+            forward_inputs, target_space, x_t, v_theta, t_bc, dt_bc, sigma_i
+        )
+        _, pred_ref = self._compute_nft_target_and_pred(
+            forward_inputs, target_space, x_t, v_old, t_bc, dt_bc, sigma_i
+        )
+        w = self._compute_nft_weight(
+            weight_mode,
+            t_bc,
+            std_t_det,
+            forward_inputs["nft_noise_level"],
+            target,
+            sum_dims,
+            pred=pred_theta,
+            sample_type="pos",
+        )
+        e_theta = dgpo_mean_dsm_energy((pred_theta - target) ** 2 * w)
+        e_ref = dgpo_mean_dsm_energy((pred_ref - target) ** 2 * w).detach()
+        delta = e_theta.detach() - e_ref
+        if dgpo_group_id is None:
+            raise ValueError(
+                "DGPO loss requires dgpo_group_id in the training batch; "
+                "ensure nft_loss_form=dgpo rollout preprocessing is active."
+            )
+        if dgpo_group_id.ndim > 1:
+            dgpo_group_id = dgpo_group_id.reshape(dgpo_group_id.shape[0], -1)[:, 0]
+        if precomputed_weight is None:
+            weight, weight_metrics = compute_dgpo_group_weights(
+                signed_adv=signed_adv,
+                delta=delta,
+                group_ids=dgpo_group_id,
+                dpo_beta=dpo_beta,
+                group_size=group_size,
+                verify=True,
+                loss_mask=self._dgpo_group_weight_loss_mask(loss_mask),
+            )
+        else:
+            weight = precomputed_weight
+            if weight.shape != signed_adv.shape:
+                weight = weight.view_as(signed_adv)
+            weight_metrics = {
+                "actor/dgpo_group_weight_mean": weight.mean().item(),
+                "actor/dgpo_group_weight_std": weight.std(unbiased=False).item()
+                if weight.numel() > 1
+                else 0.0,
+                "actor/dgpo_group_weight_min": weight.min().item(),
+                "actor/dgpo_group_weight_max": weight.max().item(),
+            }
+        loss = masked_mean(weight * signed_adv * e_theta, loss_mask)
+        with torch.no_grad():
+            metrics_data = {
+                "actor/nft_loss": loss.item(),
+                "actor/nft_tau": self._get_current_nft_tau(),
+                "actor/E_theta_mean": e_theta.mean().item(),
+                "actor/E_ref_mean": e_ref.mean().item(),
+                "actor/delta_E_mean": delta.mean().item(),
+                **weight_metrics,
             }
         return loss, metrics_data
 

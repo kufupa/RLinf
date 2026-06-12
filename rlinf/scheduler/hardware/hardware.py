@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import ClassVar, Optional, TypeVar
 
 import yaml
+from omegaconf import OmegaConf
 
 HardwareType = TypeVar("HardwareType")
 
@@ -45,6 +46,12 @@ class NodeHardwareConfig:
     """List of hardware configurations."""
 
     _hardware_config_registry: ClassVar[dict[str, "type[HardwareConfig]"]] = {}
+
+    @staticmethod
+    def _to_plain_config(config):
+        if hasattr(config, "keys"):
+            return OmegaConf.to_container(config, resolve=True)
+        return config
 
     @classmethod
     def register_hardware_config(cls, type: str):
@@ -85,17 +92,16 @@ class NodeHardwareConfig:
             )
 
         # Ensure all configs are unique
-        config_strs = [
-            yaml.dump(dict(config), sort_keys=True) for config in self.configs
-        ]
+        plain_configs = [self._to_plain_config(config) for config in self.configs]
+        config_strs = [yaml.dump(dict(config), sort_keys=True) for config in plain_configs]
         assert len(config_strs) == len(set(config_strs)), (
             "Duplicate hardware configs found in node hardware config: \n"
             + "\n".join(
-                [yaml.dump(dict(config), sort_keys=False) for config in self.configs]
+                [yaml.dump(dict(config), sort_keys=False) for config in plain_configs]
             )
         )
 
-        self.configs = [hardware_config_class(**config) for config in self.configs]
+        self.configs = [hardware_config_class(**config) for config in plain_configs]
 
 
 @dataclass

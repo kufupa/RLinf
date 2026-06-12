@@ -287,6 +287,36 @@ class NsightConfig:
 
 
 @dataclass
+class RayInitConfig:
+    """Configuration for how RLinf initializes Ray."""
+
+    address: Optional[str] = "auto"
+    """Ray address mode. Use 'auto' for existing behavior or 'local' for job-private local Ray."""
+
+    temp_dir: Optional[str] = None
+    """Optional short Ray temp directory passed as _temp_dir to ray.init."""
+
+    include_dashboard: Optional[bool] = None
+    """Optional Ray dashboard toggle passed to ray.init."""
+
+    num_cpus: Optional[int] = None
+    """Optional CPU count passed to ray.init for local/job-private Ray."""
+
+    object_store_memory: Optional[int] = None
+    """Optional object store bytes passed to ray.init."""
+
+    def __post_init__(self):
+        if self.address is not None:
+            self.address = str(self.address)
+        if self.temp_dir is not None:
+            self.temp_dir = str(self.temp_dir)
+        if self.num_cpus is not None:
+            self.num_cpus = int(self.num_cpus)
+        if self.object_store_memory is not None:
+            self.object_store_memory = int(self.object_store_memory)
+
+
+@dataclass
 class ClusterConfig:
     """Configuration for the entire cluster.
 
@@ -422,6 +452,9 @@ class ClusterConfig:
     nsight: Optional[NsightConfig] = None
     """Optional Nsight profiling configuration for worker processes."""
 
+    ray: Optional[RayInitConfig] = None
+    """Optional Ray initialization behavior."""
+
     @staticmethod
     def from_dict_cfg(cfg_dict: DictConfig) -> "ClusterConfig":
         """Create a ClusterConfig instance from a dictionary configuration.
@@ -504,6 +537,20 @@ class ClusterConfig:
 
     def __post_init__(self):
         """Post-initialization to convert nodes dicts to their respective dataclass instances."""
+        if self.ray is None:
+            self.ray = RayInitConfig()
+        else:
+            assert hasattr(self.ray, "keys"), (
+                "cluster.ray must be a dictionary. "
+                f"But got {type(self.ray)}: {self.ray}"
+            )
+            dataclass_arg_check(
+                RayInitConfig,
+                self.ray,
+                error_suffix="in cluster ray yaml config",
+            )
+            self.ray = RayInitConfig(**self.ray)
+
         if self.nsight is not None:
             assert hasattr(self.nsight, "keys"), (
                 "cluster.nsight must be a dictionary. "
